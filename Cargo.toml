@@ -1,0 +1,12 @@
+[package]
+name = "liana"
+version = "0.2.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+indoc = "2.0.7"
+crossterm = "0.28"
