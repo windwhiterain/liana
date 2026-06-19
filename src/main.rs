@@ -83,7 +83,7 @@ async fn respond(config: &Config, manager: &mut Manager, input: String) {
         content: input.clone(),
     };
 
-    let node = if manager.memories.len() > 0 {
+    let (node, theory_cache, memory_sparsity) = if manager.memories.len() > 0 {
         println!("agent: select memories from:\n");
         print!("{}", manager.display_memories());
         let mut select_memories = api::chat_completion_stream(
@@ -150,7 +150,7 @@ async fn respond(config: &Config, manager: &mut Manager, input: String) {
         // println!("manager: {:#?}", manager);
         manager.find(&select_memories)
     } else {
-        None
+        (None, None, None)
     };
 
     println!("agent: memory chain:");
@@ -223,10 +223,12 @@ async fn respond(config: &Config, manager: &mut Manager, input: String) {
     if let Some(ref usage) = usage {
         let (hit, total) = usage.cache_hit();
         if total > 0 {
-            let hit_rate = (hit as f64 / total as f64) * 100.0;
+            let cache = (hit as f64 / total as f64) * 100.0;
+            let theory_cache = theory_cache.unwrap_or(0.0);
+            let memory_sparsity = memory_sparsity.unwrap_or(0.0);
             eprintln!(
-                "[cache: {:.0}% context: {total} output: {} )]",
-                hit_rate, usage.completion_tokens
+                "{{cache: {cache:.0}% (theory: {theory_cache:.0}%), context: {total} (sparsity: {memory_sparsity:.0}%), output: {}}}",
+                usage.completion_tokens
             );
         }
         size += usage.completion_tokens;
@@ -307,7 +309,7 @@ async fn respond(config: &Config, manager: &mut Manager, input: String) {
         if total > 0 {
             let hit_rate = (hit as f64 / total as f64) * 100.0;
             eprintln!(
-                "[cache: {:.0}% context: {total} output: {} )]",
+                "[cache: {:.0}% context: {total} output: {}]",
                 hit_rate, usage.completion_tokens
             );
         }

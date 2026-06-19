@@ -52,6 +52,7 @@ pub struct Manager {
     pub memories: Vec<Memory>,
     pub nodes: Vec<Node>,
     pub last_memory: Option<MemoryId>,
+    pub size: usize,
 }
 
 impl Manager {
@@ -60,6 +61,7 @@ impl Manager {
             memories: Default::default(),
             nodes: Default::default(),
             last_memory: None,
+            size: 0,
         }
     }
     pub fn last_node(&self) -> Option<NodeId> {
@@ -85,6 +87,7 @@ impl Manager {
         DisplayMemories(self.memories.iter().enumerate())
     }
     pub fn add_memory(&mut self, mut memory: Memory, parent: Option<NodeId>) -> MemoryId {
+        self.size += memory.size;
         let memory_id = MemoryId(self.memories.len());
         let node_id = NodeId(self.nodes.len());
         memory.nodes.push(node_id);
@@ -92,9 +95,9 @@ impl Manager {
         self.add_node(memory_id, parent);
         memory_id
     }
-    pub fn find(&mut self, memories: &[usize]) -> Option<NodeId> {
+    pub fn find(&mut self, memories: &[usize]) -> (Option<NodeId>, Option<f64>, Option<f64>) {
         if memories.is_empty() {
-            return None;
+            return (None, None, None);
         }
         let cache_miss_cost_scale = 64usize;
         let mut min_cost = memories
@@ -143,6 +146,12 @@ impl Manager {
             }
         }
         // println!("cached_memories: {:#?}", cached_memories);
+        let cached_size = if let Some(min_node) = min_node {
+            self.nodes[min_node.0].size
+        } else {
+            0
+        };
+
         let mut node_id = min_node;
         for memory in memories.iter().copied() {
             let memory = MemoryId(memory);
@@ -150,7 +159,16 @@ impl Manager {
                 node_id = Some(self.add_node(memory, node_id));
             }
         }
-        node_id
+        let (theory_cache, memory_sparsity) = if let Some(node_id) = node_id {
+            let node = &self.nodes[node_id.0];
+            (
+                Some((cached_size as f64 / node.size as f64) * 100.0),
+                Some((node.size as f64 / self.size as f64) * 100.0),
+            )
+        } else {
+            (None, None)
+        };
+        (node_id, theory_cache, memory_sparsity)
     }
     fn add_node(&mut self, memory_id: MemoryId, parent: Option<NodeId>) -> NodeId {
         let memory = &self.memories[memory_id.0];
