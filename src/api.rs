@@ -1,22 +1,6 @@
+use crate::config::Config;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-
-#[derive(Debug, Clone)]
-pub struct Config {
-    pub api_key: String,
-    pub base_url: String,
-    pub model: String,
-}
-
-impl Config {
-    pub fn load() -> Result<Config, String> {
-        Ok(Config {
-            api_key: "sk-2929a6bad669429db16e982da112f5ac".to_string(),
-            base_url: "https://api.deepseek.com".to_string(),
-            model: "deepseek-v4-flash".into(),
-        })
-    }
-}
 
 #[derive(Serialize)]
 pub struct ChatRequest {

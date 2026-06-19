@@ -8,7 +8,7 @@ use liana::memory::{
     SYSTEM_PROMPT,
 };
 
-use crate::api::Config;
+use liana::config::Config;
 use liana::{
     api::{self, Message},
     memory::Manager,
@@ -17,7 +17,7 @@ use liana::{
 #[tokio::main]
 async fn main() {
     println!("Liana Agent {}", env!("CARGO_PKG_VERSION"));
-    let config = Config::load().unwrap();
+    let config = Config::load().unwrap_or_else(|| Config::setup());
     let mut memory_manager = Manager::new();
     loop {
         print!("user: ");
@@ -86,7 +86,7 @@ async fn respond(config: &Config, manager: &mut Manager, input: String) {
     let (node, theory_cache, memory_sparsity) = if manager.memories.len() > 0 {
         println!("agent: select memories from:\n");
         print!("{}", manager.display_memories());
-        let mut select_memories = api::chat_completion_stream(
+        let mut selected_memories = api::chat_completion_stream(
             &config,
             manager.messages(manager.last_node()).into_iter().chain([
                 &user_message,
@@ -107,7 +107,7 @@ async fn respond(config: &Config, manager: &mut Manager, input: String) {
         let mut content = String::new();
         let mut in_reasoning = false;
 
-        while let Some(event) = select_memories.recv().await {
+        while let Some(event) = selected_memories.recv().await {
             match event {
                 api::StreamEvent::Reasoning(text) => {
                     if !in_reasoning {
@@ -142,13 +142,13 @@ async fn respond(config: &Config, manager: &mut Manager, input: String) {
         }
         io::stdout().flush().ok();
 
-        let select_memories: Vec<usize> = serde_json::from_str(&content).unwrap();
+        let selected_memories: Vec<usize> = serde_json::from_str(&content).unwrap();
         print!(
             "assistant: selected memories:\n{}",
-            DisplayMemories(select_memories.iter().map(|x| (*x, &manager.memories[*x])))
+            DisplayMemories(selected_memories.iter().map(|x| (*x, &manager.memories[*x])))
         );
         // println!("manager: {:#?}", manager);
-        manager.find(&select_memories)
+        manager.find(&selected_memories)
     } else {
         (None, None, None)
     };
@@ -240,7 +240,7 @@ async fn respond(config: &Config, manager: &mut Manager, input: String) {
     };
 
     println!("agent: summarize memory:");
-    let mut memory_description = api::chat_completion_stream(
+    let mut memory_summery = api::chat_completion_stream(
         &config,
         once(&Message {
             role: "system".to_string(),
@@ -264,7 +264,7 @@ async fn respond(config: &Config, manager: &mut Manager, input: String) {
     let mut in_reasoning = false;
     let mut usage: Option<api::Usage> = None;
 
-    while let Some(event) = memory_description.recv().await {
+    while let Some(event) = memory_summery.recv().await {
         match event {
             api::StreamEvent::Reasoning(text) => {
                 if !in_reasoning {
