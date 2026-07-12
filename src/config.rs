@@ -25,6 +25,7 @@ impl Config {
         if !path.exists() {
             return None;
         }
+        println!("agent: load config from: {}", path.to_string_lossy());
         let content = std::fs::read_to_string(&path).ok()?;
         serde_json::from_str(&content).ok()
     }
