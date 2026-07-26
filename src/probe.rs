@@ -33,6 +33,7 @@ pub enum FieldKind {
 pub struct FieldInfo {
     pub name: &'static str,
     pub kind: FieldKind,
+    pub hide_label: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -72,10 +73,13 @@ pub fn probe_view<T: Probe>(value: &T) -> Element<'_, ProbeMsg<T::ChildMsg>> {
             .enumerate()
             .map(|(i, label)| {
                 if i == current {
-                    button(text(*label).size(14)).into()
+                    button(text(*label).size(14))
+                        .style(selected_tab_style)
+                        .into()
                 } else {
                     button(text(*label).size(14))
                         .on_press(ProbeMsg::SelectVariant { index: i })
+                        .style(unselected_tab_style)
                         .into()
                 }
             })
@@ -134,9 +138,41 @@ fn render_field<'a, T: Probe>(
         }
         FieldKind::EnumVariant => text("").into(),
     };
-    row![label, control].spacing(8).into()
+    if field.hide_label {
+        control
+    } else {
+        row![label, control].spacing(8).into()
+    }
 }
 
 pub fn probe_update<T: Probe>(value: &mut T, msg: ProbeMsg<T::ChildMsg>) {
     value.apply(msg);
+}
+
+// ── Tab button styles ──────────────────────────────────────────────
+
+fn selected_tab_style(_theme: &iced::Theme, _status: iced::widget::button::Status) -> iced::widget::button::Style {
+    iced::widget::button::Style {
+        background: Some(iced::Background::Color(iced::Color::from_rgb(0.25, 0.25, 0.35))),
+        text_color: iced::Color::WHITE,
+        border: iced::Border {
+            color: iced::Color::from_rgb(0.4, 0.4, 0.55),
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
+fn unselected_tab_style(_theme: &iced::Theme, _status: iced::widget::button::Status) -> iced::widget::button::Style {
+    iced::widget::button::Style {
+        background: Some(iced::Background::Color(iced::Color::from_rgb(0.12, 0.12, 0.15))),
+        text_color: iced::Color::from_rgb(0.5, 0.5, 0.6),
+        border: iced::Border {
+            color: iced::Color::from_rgb(0.2, 0.2, 0.25),
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        ..Default::default()
+    }
 }

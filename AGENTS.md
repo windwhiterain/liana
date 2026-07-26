@@ -1,35 +1,53 @@
 # AGENTS.md
 
-## Check Compile Error
+## Quick check
 
 ```bash
-cargo check
+cargo check        # compiles main + liana-probe proc-macro
 ```
 
-Standard Rust tooling — no special build system quirks.
+No special build system — standard Cargo workspace. Edition 2024.
 
 ## Architecture
 
-Single-crate Rust project (edition 2024). The app is an eframe/egui GUI agent harness, **not** a CLI.
+Two crates: `liana` (app) + `liana-probe` (proc-macro). The app is an **iced 0.14** desktop GUI, not a CLI.
 
-- **`src/lib.rs`** — real entrypoint: `App` implements `eframe::App`; wires config, LLM client, and current UI state.
-- **`src/main.rs`** — stub placeholder (`println!("Hello, world!")`). The eframe entrypoint (`eframe::run_native`) is not wired yet.
-- **`src/config.rs`** — loads config from `{config_dir}/liana/config.json` (via `dirs` crate). Fields: `base_url`, `api_key`, `model`. Panics if missing or unparseable.
-- **`src/llm.rs`** — builds a `rig` OpenAI-compatible client using the Responses API (`GenericResponsesCompletionModel`). The LLM type is `rig::agent::AgentBuilder`.
-- **`src/state.rs`** — `State` trait with a single `ui()` method. Screens implement this trait; currently only `Chat`.
-- **`src/state/chat.rs`** — `Chat` state using `egui_probe` for UI introspection.
-- **`src/memory.rs`** — tree-based memory manager with cache-hit-aware node placement (`find()`), memory selection prompts, and iterator utilities.
+### `liana` crate
 
-## Conventions
+| File | Role |
+|---|---|
+| `src/main.rs` | Bootstraps `iced::application(init, update, view)` — no trait impl |
+| `src/lib.rs` | `App` struct, `Message` enum, `init()`/`update()`/`view()` free functions |
+| `src/config.rs` | `Config` deserialized from `{config_dir}/liana/config.json` (panics on missing) |
+| `src/llm.rs` | `LLM` type alias for `rig::agent::Agent<GenericCompletionModel>`. Factory: `llm_from_config(&Config)` |
+| `src/memory.rs` | Tree-based memory manager. UI-agnostic — no iced imports |
+| `src/state/chat.rs` | `Chat` struct + `ChatMessage` enum. `Probe` derives on `Config` and `MessageConfig` |
+| `src/probe.rs` | `Probe` trait, `ProbeMsg<Child>`, generic `probe_view()`/`probe_update()`. Type aliases: `TextEditor`, `TextEditorAction` |
 
-- `use` imports are explicit module paths (`use crate::config::Config`), not wildcards.
-- Snake_case for struct fields — matches Drizzle-style conventions from the CLAUDE.md guidelines.
-- `indoc` crate used for multi-line string constants (prompts).
-- The `State` trait uses dynamic dispatch (`Box<dyn State>`) — new screens must implement `State`.
+### `liana-probe` crate (proc-macro)
+
+`#[derive(Probe)]` generates `describe()`, `field_value()`, `apply()`, `variants()`, `current_variant_index()` on a type. Supports:
+
+- Structs with named fields: infers `FieldKind` from type (`String`→String, `bool`→Bool, `probe::TextEditor`→Multiline)
+- Enums with tuple variants: delegates `field_value`/`apply` to inner probe, generates `SelectVariant` for switching
+- Per-field attrs: `#[probe(hide_label)]`, `#[probe(label = "...")]`, `#[probe(kind = "...")]`
+- Enum attrs: `#[probe(tags = "inlined")]` (renders variant tabs)
+
+References paths via `crate::probe::*` within the `liana` crate (proc-macro assumes it's used from liana).
+
+## Key conventions
+
+- Iced 0.14 uses **free functions** (`init`, `update`, `view`), not the old `Application` trait
+- `Command` is `Task` in iced 0.14. Async: `Task::perform(future, Msg::Response)`
+- LLM is wrapped in `Arc<LLM>` for cloneability across async tasks
+- Markdown rendering uses `frostmark` (`MarkState` + `MarkWidget`), stored as `Vec<MarkState>` parallel to `Vec<Message>`
+- `probe::TextEditor = iced::widget::text_editor::Content` — a type alias. Use `.text()` to read, `.perform(action)` for edits, `.new()` to create empty
+- The `Probe` trait uses lifetime-annotated `FieldValue<'a>` for borrow-safe rendering of `text_editor` widgets
+- Module structure: `pub mod` declarations in `lib.rs`. No wildcard imports
 
 ## Config
 
-The app expects `liana/config.json` in the platform config directory:
+`{config_dir}/liana/config.json` (platform config dir via `dirs` crate):
 
 ```json
 {
@@ -39,11 +57,15 @@ The app expects `liana/config.json` in the platform config directory:
 }
 ```
 
-## Key Dependencies
+## Dependencies
 
-- **`rig`** (`0.40.0`) — LLM framework, OpenAI Responses API provider
-- **`eframe`** (`0.35.0`) — egui framework for native GUI
-- **`egui-probe`** (`0.12.0`) — derive-macro UI introspection
-- **`serde`** / **`serde_json`** — config parsing
-- **`dirs`** — platform config directory resolution
-- **`indoc`** — indented string literals for prompts
+| Crate | Version | Purpose |
+|---|---|---|
+| `iced` | 0.14 | GUI framework |
+| `frostmark` | 0.3 | Markdown widget for iced (comrak-based) |
+| `rig` | 0.40.0 | LLM client (OpenAI Responses API) |
+| `rig-memory` | 0.40.0 | Token counting |
+| `liana-probe` | path dep | Derive macro for auto-widget generation |
+| `indoc` | 2 | Multi-line string literals for prompts |
+| `serde`/`serde_json` | 1 | Config parsing |
+| `tokio` | 1.53 | Async runtime (multi-thread) |

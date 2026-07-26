@@ -14,6 +14,7 @@ use rig::{
 };
 
 use crate::{
+    ErasedState, State,
     llm::LLM,
     memory::{self, SUMMARY_PROMPT},
     probe,
@@ -61,6 +62,7 @@ impl Default for Config {
 
 #[derive(Debug, Clone, Probe)]
 pub struct MessageConfig {
+    #[probe(hide_label)]
     pub message: probe::TextEditor,
 }
 
@@ -82,17 +84,21 @@ impl Chat {
             .messages(parent_memory)
             .chain(messages.iter().cloned())
     }
+}
 
-    pub fn update(
+impl State for Chat {
+    type Message = ChatMessage;
+
+    fn update(
         &mut self,
         message: ChatMessage,
         llm: &Arc<LLM>,
         memory_manager: &mut memory::Manager,
-    ) -> Task<ChatMessage> {
+    ) -> (Task<ChatMessage>, Option<Box<dyn ErasedState>>) {
         match message {
             ChatMessage::Run => {
                 if self.busy {
-                    return Task::none();
+                    return (Task::none(), None);
                 }
                 self.busy = true;
 
@@ -113,14 +119,17 @@ impl Chat {
                         });
                         self.markdown_states.push(MarkState::default());
 
-                        Task::perform(
-                            async move {
-                                llm.prompt(message_text)
-                                    .history(history)
-                                    .await
-                                    .map_err(|e: PromptError| e.to_string())
-                            },
-                            ChatMessage::Response,
+                        (
+                            Task::perform(
+                                async move {
+                                    llm.prompt(message_text)
+                                        .history(history)
+                                        .await
+                                        .map_err(|e: PromptError| e.to_string())
+                                },
+                                ChatMessage::Response,
+                            ),
+                            None,
                         )
                     }
                     Config::Summary => {
@@ -137,14 +146,17 @@ impl Chat {
                         });
                         self.markdown_states.push(MarkState::default());
 
-                        Task::perform(
-                            async move {
-                                llm.prompt(SUMMARY_PROMPT)
-                                    .history(history)
-                                    .await
-                                    .map_err(|e: PromptError| e.to_string())
-                            },
-                            ChatMessage::Response,
+                        (
+                            Task::perform(
+                                async move {
+                                    llm.prompt(SUMMARY_PROMPT)
+                                        .history(history)
+                                        .await
+                                        .map_err(|e: PromptError| e.to_string())
+                                },
+                                ChatMessage::Response,
+                            ),
+                            None,
                         )
                     }
                 }
@@ -168,16 +180,16 @@ impl Chat {
                         eprintln!("LLM error: {}", err);
                     }
                 }
-                Task::none()
+                (Task::none(), None)
             }
             ChatMessage::ConfigProbe(msg) => {
                 probe::probe_update(&mut self.config, msg);
-                Task::none()
+                (Task::none(), None)
             }
         }
     }
 
-    pub fn view(&self) -> Element<'_, ChatMessage> {
+    fn view(&self) -> Element<'_, ChatMessage> {
         column![
             scrollable(column(
                 self.messages

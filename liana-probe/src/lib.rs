@@ -37,8 +37,13 @@ fn derive_struct(
         let name_str = name.to_string();
         let kind = &field_kinds[i];
         let display = field_attrs[i].label.as_ref().unwrap_or(&name_str);
+        let hide_label = field_attrs[i].hide_label;
         quote! {
-            crate::probe::FieldInfo { name: #display, kind: crate::probe::FieldKind::#kind }
+            crate::probe::FieldInfo {
+                name: #display,
+                kind: crate::probe::FieldKind::#kind,
+                hide_label: #hide_label,
+            }
         }
     });
 
@@ -308,6 +313,8 @@ fn parse_field_attrs(attrs: &[syn::Attribute]) -> FieldAttrs {
                 } else if meta.path.is_ident("kind") {
                     let value: LitStr = meta.value()?.parse()?;
                     result.kind_override = Some(value.value());
+                } else if meta.path.is_ident("hide_label") {
+                    result.hide_label = true;
                 }
                 Ok(())
             }).ok();
@@ -321,6 +328,7 @@ struct FieldAttrs {
     with: Option<String>,
     label: Option<String>,
     kind_override: Option<String>,
+    hide_label: bool,
 }
 
 fn infer_field_kind(field: &syn::Field) -> proc_macro2::TokenStream {
