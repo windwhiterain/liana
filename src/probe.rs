@@ -1,7 +1,12 @@
 use iced::{
     Element, Length,
-    widget::{button, column, container, row, text, text_input, toggler},
+    widget::{button, column, row, text, text_editor, text_input, toggler},
 };
+
+// ── Type aliases ────────────────────────────────────────────────────
+
+pub type TextEditor = text_editor::Content;
+pub type TextEditorAction = text_editor::Action;
 
 // ── Generic probe message ──────────────────────────────────────────
 
@@ -9,6 +14,7 @@ use iced::{
 pub enum ProbeMsg<Child = ()> {
     SetString { index: usize, value: String },
     SetBool { index: usize, value: bool },
+    TextAction { index: usize, action: TextEditorAction },
     SelectVariant { index: usize },
     Child(Child),
 }
@@ -30,9 +36,10 @@ pub struct FieldInfo {
 }
 
 #[derive(Debug, Clone)]
-pub enum FieldValue {
+pub enum FieldValue<'a> {
     String(String),
     Bool(bool),
+    TextContent(&'a TextEditor),
 }
 
 // ── The Probe trait ────────────────────────────────────────────────
@@ -41,7 +48,7 @@ pub trait Probe: Sized {
     type ChildMsg: Clone;
 
     fn describe(&self) -> Vec<FieldInfo>;
-    fn field_value(&self, index: usize) -> FieldValue;
+    fn field_value<'a>(&'a self, index: usize) -> FieldValue<'a>;
     fn apply(&mut self, msg: ProbeMsg<Self::ChildMsg>);
 
     fn variants(&self) -> Vec<&'static str> {
@@ -109,28 +116,13 @@ fn render_field<'a, T: Probe>(
                 .on_input(move |s| ProbeMsg::SetString { index, value: s })
                 .into()
         }
-        FieldKind::Multiline => {
-            let current = match value.field_value(index) {
-                FieldValue::String(s) => s,
-                _ => String::new(),
-            };
-            container(
-                text_input("", &current)
-                    .on_input(move |s| ProbeMsg::SetString { index, value: s })
-                    .width(Length::Fill),
-            )
-            .padding(4)
-            .style(|_theme: &iced::Theme| container::Style {
-                border: iced::Border {
-                    color: iced::Color::from_rgb(0.3, 0.3, 0.35),
-                    width: 1.0,
-                    radius: 4.0.into(),
-                },
-                ..Default::default()
-            })
-            .height(Length::Fixed(64.0))
-            .into()
-        }
+        FieldKind::Multiline => match value.field_value(index) {
+            FieldValue::TextContent(content) => text_editor(content)
+                .on_action(move |action| ProbeMsg::TextAction { index, action })
+                .height(Length::Fixed(80.0))
+                .into(),
+            _ => text("").into(),
+        },
         FieldKind::Bool => {
             let current = match value.field_value(index) {
                 FieldValue::Bool(b) => b,
@@ -140,9 +132,7 @@ fn render_field<'a, T: Probe>(
                 .on_toggle(move |b| ProbeMsg::SetBool { index, value: b })
                 .into()
         }
-        FieldKind::EnumVariant => {
-            text("").into()
-        }
+        FieldKind::EnumVariant => text("").into(),
     };
     row![label, control].spacing(8).into()
 }

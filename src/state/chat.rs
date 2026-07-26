@@ -59,10 +59,17 @@ impl Default for Config {
     }
 }
 
-#[derive(Debug, Clone, Default, Probe)]
+#[derive(Debug, Clone, Probe)]
 pub struct MessageConfig {
-    #[probe(kind = "Multiline")]
-    pub message: String,
+    pub message: probe::TextEditor,
+}
+
+impl Default for MessageConfig {
+    fn default() -> Self {
+        Self {
+            message: probe::TextEditor::new(),
+        }
+    }
 }
 
 impl Chat {
@@ -91,7 +98,8 @@ impl Chat {
 
                 match &mut self.config {
                     Config::Message(config) => {
-                        let message_text = std::mem::take(&mut config.message);
+                        let message_text = config.message.text().to_string();
+                        config.message = probe::TextEditor::new();
                         let llm = Arc::clone(llm);
                         let history =
                             Self::context(self.parent_memory, &self.messages, memory_manager)

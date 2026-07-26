@@ -46,6 +46,8 @@ fn derive_struct(
         let kind_str = field_kinds[i].to_string();
         if kind_str.contains("Bool") {
             quote! { #i => crate::probe::FieldValue::Bool(self.#name), }
+        } else if kind_str.contains("Multiline") {
+            quote! { #i => crate::probe::FieldValue::TextContent(&self.#name), }
         } else {
             quote! { #i => crate::probe::FieldValue::String(self.#name.clone()), }
         }
@@ -56,6 +58,12 @@ fn derive_struct(
         if kind_str.contains("Bool") {
             quote! {
                 crate::probe::ProbeMsg::SetBool { index: #i, value } => { self.#name = value; }
+            }
+        } else if kind_str.contains("Multiline") {
+            quote! {
+                crate::probe::ProbeMsg::TextAction { index: #i, action } => {
+                    self.#name.perform(action);
+                }
             }
         } else {
             quote! {
@@ -76,7 +84,7 @@ fn derive_struct(
                 vec![#(#describe_fields),*]
             }
 
-            fn field_value(&self, index: usize) -> crate::probe::FieldValue {
+            fn field_value<'a>(&'a self, index: usize) -> crate::probe::FieldValue<'a> {
                 match index {
                     #(#field_value_arms)*
                     _ => crate::probe::FieldValue::String(String::new()),
@@ -166,6 +174,20 @@ fn derive_enum(
         }
     }).collect();
 
+    // text_action_delegate: delegate to inner probe for variants with data
+    let text_action_delegate: Vec<_> = data.variants.iter().map(|v| {
+        let vname = &v.ident;
+        if has_data(v) {
+            quote! {
+                Self::#vname(inner) => {
+                    inner.apply(crate::probe::ProbeMsg::TextAction { index, action });
+                }
+            }
+        } else {
+            quote! {}
+        }
+    }).collect();
+
     // cv_arms: current_variant_index
     let cv_arms: Vec<_> = variant_names.iter().enumerate().map(|(i, vname)| {
         if has_data(&data.variants[i]) {
@@ -187,7 +209,7 @@ fn derive_enum(
                 #describe_body
             }
 
-            fn field_value(&self, index: usize) -> crate::probe::FieldValue {
+            fn field_value<'a>(&'a self, index: usize) -> crate::probe::FieldValue<'a> {
                 #field_value_body
             }
 
@@ -208,6 +230,12 @@ fn derive_enum(
                     crate::probe::ProbeMsg::SetBool { index, value } => {
                         match self {
                             #(#set_bool_delegate)*
+                            _ => {}
+                        }
+                    }
+                    crate::probe::ProbeMsg::TextAction { index, action } => {
+                        match self {
+                            #(#text_action_delegate)*
                             _ => {}
                         }
                     }
@@ -303,7 +331,9 @@ fn infer_field_kind(field: &syn::Field) -> proc_macro2::TokenStream {
         let ident = format_ident!("{}", override_kind);
         return quote! { #ident };
     }
-    if ty_str.contains("String") || ty_str.contains("str") {
+    if ty_str.contains("TextEditor") {
+        quote! { Multiline }
+    } else if ty_str.contains("String") || ty_str.contains("str") {
         quote! { String }
     } else if ty_str.contains("bool") {
         quote! { Bool }
