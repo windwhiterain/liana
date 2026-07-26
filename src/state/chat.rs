@@ -75,6 +75,13 @@ impl Default for MessageConfig {
 }
 
 impl Chat {
+    pub fn with_parent_memory(parent_memory: Option<memory::NodeId>) -> Self {
+        Self {
+            parent_memory,
+            ..Self::default()
+        }
+    }
+
     pub fn context<'a>(
         parent_memory: Option<memory::NodeId>,
         messages: &'a Vec<Message>,
