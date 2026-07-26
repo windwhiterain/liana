@@ -8,7 +8,7 @@ async fn main() {
         ..Default::default()
     };
     eframe::run_native(
-        "Lina",
+        "Liana",
         options,
         Box::new(|_| {Ok(Box::new(App::new()))}),
     ).unwrap();

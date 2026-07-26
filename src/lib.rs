@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use eframe::egui::{self, Align, Layout};
+
 use crate::{
     config::{Config, load_config},
     llm::{LLM, llm_from_config},
@@ -14,7 +16,8 @@ pub mod state;
 pub struct App {
     pub config: Config,
     pub llm: Arc<LLM>,
-    pub state: Box<dyn State>,
+    pub state: Option<Box<dyn State>>,
+    pub memory_manager: memory::Manager,
 }
 
 impl App {
@@ -24,22 +27,36 @@ impl App {
         Self {
             config,
             llm,
-            state: Box::new(Chat::default()),
+            state: Some(Box::new(Chat::default())),
+            memory_manager: Default::default(),
         }
     }
 }
 
 impl eframe::App for App {
-    fn ui(&mut self, ui: &mut eframe::egui::Ui, frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut eframe::egui::Ui, _frame: &mut eframe::Frame) {
+        let mut state = std::mem::take(&mut self.state).unwrap();
+        state.poll(self);
         eframe::egui::Panel::bottom("bottom").show(ui, |ui| {
-            self.state.ui(ui, &self.llm);
-            if ui.button("Run").clicked() {
-                self.state.run(&self.llm);
-            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui
+                    .add_sized(
+                        egui::vec2(0.0, ui.available_height()),
+                        egui::Button::new("run"),
+                    )
+                    .clicked()
+                {
+                    state.run(self);
+                }
+                state.ui(ui);
+            });
         });
 
         eframe::egui::CentralPanel::default().show(ui, |ui| {
-            self.state.ui_remainder(ui, frame);
+            state.ui_remainder(ui);
         });
+        if self.state.is_none() {
+            self.state = Some(state)
+        }
     }
 }

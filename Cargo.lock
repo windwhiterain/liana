@@ -5350,6 +5350,7 @@ dependencies = [
  "image",
  "indoc",
  "rig",
+ "rig-memory",
  "serde",
  "serde_json",
  "tokio",
@@ -7644,6 +7645,16 @@ dependencies = [
  "rig-core",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "rig-memory"
+version = "0.40.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2270669e785384a032bf34a26de0677da93d24e04c79009f9e227d771f21202d"
+dependencies = [
+ "rig-core",
+ "tracing",
 ]
 
 [[package]]

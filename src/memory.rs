@@ -1,4 +1,10 @@
 use indoc::indoc;
+use rig::{
+    OneOrMany,
+    agent::Text,
+    message::{AssistantContent, UserContent},
+};
+use rig_memory::{HeuristicTokenCounter, TokenCounter};
 use std::{collections::HashSet, fmt::Display};
 
 pub const SELECT_MEMORY_PROMPT: &'static str = indoc!(
@@ -26,6 +32,8 @@ pub const MEMORY_DESCRIBE_PROMPT: &'static str = indoc! {
     "
 };
 
+pub const SUMMARY_PROMPT: &str = "summary our chat since the previous summary";
+
 pub type Message = rig::message::Message;
 
 #[derive(Debug)]
@@ -37,7 +45,9 @@ pub struct Memory {
 }
 
 impl Memory {
-    pub fn new(messages: Vec<Message>, summary: String, size: usize) -> Self {
+    pub fn new(messages: Vec<Message>, summary: String) -> Self {
+        let counter = HeuristicTokenCounter::default();
+        let size = messages.iter().map(|m| counter.count(m)).sum();
         Self {
             messages,
             summary,
@@ -55,15 +65,18 @@ pub struct Manager {
     pub size: usize,
 }
 
-impl Manager {
-    pub fn new() -> Self {
+impl Default for Manager {
+    fn default() -> Self {
         Self {
             memories: Default::default(),
             nodes: Default::default(),
-            last_memory: None,
-            size: 0,
+            last_memory: Default::default(),
+            size: Default::default(),
         }
     }
+}
+
+impl Manager {
     pub fn last_node(&self) -> Option<NodeId> {
         let Some(memory) = self.last_memory else {
             return None;
@@ -75,13 +88,27 @@ impl Manager {
             .copied()
             .max_by_key(|x| self.nodes[x.0].size)
     }
-    pub fn contents(&self, node: Option<NodeId>) -> impl IntoIterator<Item = &Message> {
+    pub fn messages(&self, node: Option<NodeId>) -> impl Iterator<Item = Message> {
         let memories = MemoryIterator {
             manager: self,
             node,
         }
         .collect::<Vec<_>>();
-        memories.into_iter().rev().flat_map(|x| &x.messages)
+        memories.into_iter().rev().flat_map(|x| {
+            x.messages.iter().cloned().chain([
+                Message::User {
+                    content: OneOrMany::one(UserContent::Text(Text::new(
+                        "summary our chat since the previous summary",
+                    ))),
+                },
+                Message::Assistant {
+                    id: None,
+                    content: OneOrMany::one(AssistantContent::Text(Text::new(
+                        x.summary.clone(),
+                    ))),
+                },
+            ])
+        })
     }
     pub fn display_memories(&self) -> impl Display {
         DisplayMemories(self.memories.iter().enumerate())
