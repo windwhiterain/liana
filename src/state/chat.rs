@@ -26,27 +26,36 @@ pub struct Config {
     pub message: String,
 }
 
-impl State for Chat {
-    fn ui(&mut self, ui: &mut eframe::egui::Ui, _frame: &mut eframe::Frame) {
-        if let Some(response) = &mut self.response {
-            if let Ok(response) = response.try_recv() {
-                match response {
-                    Ok(response) => {
-                        self.messages.push(Message::Assistant {
-                            id: None,
-                            content: OneOrMany::one(AssistantContent::Text(Text {
-                                text: response,
-                                ..Default::default()
-                            })),
-                        });
-                    }
-                    Err(err) => {
-                        println!("{}", err)
-                    }
-                }
-                self.response = None;
+impl Chat {
+    fn poll_response(&mut self) {
+        let Some(response) = &mut self.response else {
+            return;
+        };
+        let Ok(response) = response.try_recv() else {
+            return;
+        };
+        match response {
+            Ok(response) => {
+                self.messages.push(Message::Assistant {
+                    id: None,
+                    content: OneOrMany::one(AssistantContent::Text(Text {
+                        text: response,
+                        ..Default::default()
+                    })),
+                });
+            }
+            Err(err) => {
+                println!("{}", err)
             }
         }
+        self.response = None;
+    }
+}
+
+impl State for Chat {
+    fn ui_remainder(&mut self, ui: &mut eframe::egui::Ui, _frame: &mut eframe::Frame) {
+        self.poll_response();
+
         eframe::egui::ScrollArea::vertical().show(ui, |ui| {
             for message in &self.messages {
                 match message {
@@ -73,6 +82,9 @@ impl State for Chat {
                 }
             }
         });
+    }
+
+    fn ui(&mut self, ui: &mut eframe::egui::Ui, llm: &Arc<LLM>) {
         Probe::new(&mut self.config).show(ui);
     }
 

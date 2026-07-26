@@ -1,7 +1,7 @@
 # Liana
 An opinioned agent harness, exporing new things.
 ## Philosophy
-- LLM contribution must be human polished.
+- No LLM contribution without human polishment.
 - Less prompt is more.
 ## Features
-- Memory management with cache hit awareness.
+- Cache-aware memory management.

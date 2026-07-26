@@ -31,11 +31,15 @@ impl App {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut eframe::egui::Ui, frame: &mut eframe::Frame) {
-        ui.horizontal(|ui| {
-            if ui.button("run").clicked() {
+        eframe::egui::Panel::bottom("bottom").show(ui, |ui| {
+            self.state.ui(ui, &self.llm);
+            if ui.button("Run").clicked() {
                 self.state.run(&self.llm);
             }
         });
-        self.state.ui(ui, frame);
+
+        eframe::egui::CentralPanel::default().show(ui, |ui| {
+            self.state.ui_remainder(ui, frame);
+        });
     }
 }
