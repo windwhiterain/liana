@@ -2,7 +2,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 use iced::{
-    Alignment, Element, Length, Task, Theme,
+    Element, Length, Task, Theme,
     widget::{button, column, container, row, text},
 };
 
@@ -35,7 +35,7 @@ pub trait State {
         memory_manager: &mut memory::Manager,
     ) -> (Task<Self::Message>, Option<Box<dyn ErasedState>>);
 
-    fn view(&self) -> Element<'_, Self::Message>;
+    fn view<'a>(&'a self, memory_manager: &'a memory::Manager) -> Element<'a, Self::Message>;
 }
 
 // ── Object-safe trait for type-erased storage ──
@@ -48,7 +48,7 @@ pub trait ErasedState {
         memory_manager: &mut memory::Manager,
     ) -> (Task<Message>, Option<Box<dyn ErasedState>>);
 
-    fn view_erased(&self) -> Element<'_, Message>;
+    fn view_erased<'a>(&'a self, memory_manager: &'a memory::Manager) -> Element<'a, Message>;
 }
 
 // ── Adapter: wraps a typed State, bridges Self::Message ↔ Message via downcast ──
@@ -79,8 +79,8 @@ impl<S: State> ErasedState for Erased<S> {
         }
     }
 
-    fn view_erased(&self) -> Element<'_, Message> {
-        self.state.view().map(Into::into)
+    fn view_erased<'a>(&'a self, memory_manager: &'a memory::Manager) -> Element<'a, Message> {
+        self.state.view(memory_manager).map(Into::into)
     }
 }
 
@@ -152,20 +152,23 @@ pub fn init() -> App {
 }
 
 pub fn update(app: &mut App, message: Message) -> Task<Message> {
-    if let Ok(nav) = message.downcast::<SidebarNav>() {
-        if nav.0 < app.sidebar.len() {
-            app.state = (app.sidebar[nav.0].factory)(app);
+    match message.downcast::<SidebarNav>() {
+        Ok(nav) => {
+            if nav.0 < app.sidebar.len() {
+                app.state = (app.sidebar[nav.0].factory)(app);
+            }
+            Task::none()
         }
-        return Task::none();
+        Err(message) => {
+            let (task, transition) = app
+                .state
+                .update_erased(message, &app.llm, &mut app.memory_manager);
+            if let Some(new_state) = transition {
+                app.state = new_state;
+            }
+            task
+        }
     }
-
-    let (task, transition) = app
-        .state
-        .update_erased(message, &app.llm, &mut app.memory_manager);
-    if let Some(new_state) = transition {
-        app.state = new_state;
-    }
-    task
 }
 
 pub fn view(app: &App) -> Element<'_, Message> {
@@ -174,10 +177,11 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .iter()
         .enumerate()
         .map(|(i, entry)| {
-            button(text(entry.label))
+            let btn: Element<'_, SidebarNav> = button(text(entry.label))
                 .on_press(SidebarNav(i))
                 .width(Length::Fill)
-                .into()
+                .into();
+            btn.map(|nav| Box::new(nav) as Message)
         })
         .collect();
 
@@ -185,7 +189,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .width(Length::Fixed(120.0))
         .padding(8);
 
-    row![sidebar, app.state.view_erased()].into()
+    row![sidebar, app.state.view_erased(&app.memory_manager)].into()
 }
 
 pub fn theme(_app: &App) -> Theme {

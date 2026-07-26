@@ -44,7 +44,8 @@ impl Default for Chat {
 pub enum ChatMessage {
     Run,
     ConfigProbe(probe::ProbeMsg<ConfigProbeMsg>),
-    Response(Result<String, String>),
+    ChatResponse(Result<String, String>),
+    SummaryResponse(Result<String, String>),
 }
 
 #[derive(Debug, Clone, Probe)]
@@ -134,7 +135,7 @@ impl State for Chat {
                                         .await
                                         .map_err(|e: PromptError| e.to_string())
                                 },
-                                ChatMessage::Response,
+                                ChatMessage::ChatResponse,
                             ),
                             None,
                         )
@@ -161,14 +162,14 @@ impl State for Chat {
                                         .await
                                         .map_err(|e: PromptError| e.to_string())
                                 },
-                                ChatMessage::Response,
+                                ChatMessage::SummaryResponse,
                             ),
                             None,
                         )
                     }
                 }
             }
-            ChatMessage::Response(result) => {
+            ChatMessage::ChatResponse(result) => {
                 self.busy = false;
                 match result {
                     Ok(response) => {
@@ -189,6 +190,30 @@ impl State for Chat {
                 }
                 (Task::none(), None)
             }
+            ChatMessage::SummaryResponse(result) => {
+                self.busy = false;
+                match result {
+                    Ok(response) => {
+                        self.messages.push(Message::Assistant {
+                            id: None,
+                            content: OneOrMany::one(AssistantContent::Text(Text {
+                                text: response.clone(),
+                                ..Default::default()
+                            })),
+                        });
+                        let messages = std::mem::take(&mut self.messages);
+                        self.markdown_states.clear();
+                        let memory = memory::Memory::new(messages, response);
+                        memory_manager.add_memory(memory, self.parent_memory);
+                        self.parent_memory =
+                            memory_manager.memories.last().and_then(|m| m.nodes.last().copied());
+                    }
+                    Err(err) => {
+                        eprintln!("LLM error during summary: {}", err);
+                    }
+                }
+                (Task::none(), None)
+            }
             ChatMessage::ConfigProbe(msg) => {
                 probe::probe_update(&mut self.config, msg);
                 (Task::none(), None)
@@ -196,7 +221,7 @@ impl State for Chat {
         }
     }
 
-    fn view(&self) -> Element<'_, ChatMessage> {
+    fn view<'a>(&'a self, _memory_manager: &'a memory::Manager) -> Element<'a, ChatMessage> {
         column![
             scrollable(column(
                 self.messages
