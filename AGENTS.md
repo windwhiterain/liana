@@ -1,10 +1,9 @@
 # AGENTS.md
 
-## Build & Run
+## Check Compile Error
 
 ```bash
-cargo build
-cargo run
+cargo check
 ```
 
 Standard Rust tooling — no special build system quirks.
