@@ -2,7 +2,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 use iced::{
-    Element, Length, Task, Theme,
+    Color, Element, Length, Task, Theme,
     widget::{button, column, container, row, text},
 };
 
@@ -187,7 +187,16 @@ pub fn view(app: &App) -> Element<'_, Message> {
 
     let sidebar = container(column(buttons).spacing(4))
         .width(Length::Fixed(120.0))
-        .padding(8);
+        .height(Length::Fill)
+        .padding(8)
+        .style(|_: &Theme| {
+            container::Style {
+                background: Some(iced::Background::Color(Color::from_rgb(
+                    0.1, 0.11, 0.16,
+                ))),
+                ..Default::default()
+            }
+        });
 
     row![sidebar, app.state.view_erased(&app.memory_manager)].into()
 }

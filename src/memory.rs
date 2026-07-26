@@ -16,22 +16,6 @@ pub const SELECT_MEMORY_PROMPT: &'static str = indoc!(
     "
 );
 
-pub const SYSTEM_PROMPT: &'static str = indoc!(
-    "
-    you are AI assistant \"Liana\".
-    when user ask question or assign task: give comprehensive, in-depth thought and answer.
-    when user ask to summarize: be brief and at the point.
-    when user shows a question or task then let you select relative memories listed: think quick and output json.
-    "
-);
-
-pub const MEMORY_DESCRIBE_PROMPT: &'static str = indoc! {
-    "
-    use a brief sentence to summarize the topic of my last question or task I given you and the your last answer or respond you given me. 
-    the summarization must use the same language as the dialogue to be summarized.
-    "
-};
-
 pub const SUMMARY_PROMPT: &str = "summary our chat since the previous summary";
 
 pub type Message = rig::message::Message;
