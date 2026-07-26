@@ -1,54 +1,53 @@
-use std::mem;
+use std::sync::Arc;
 
-use eframe::egui::{Response, TextEdit, Ui, vec2};
-use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
-use egui_probe::{EguiProbe, Probe, Style};
+use frostmark::{MarkState, MarkWidget};
+use iced::{
+    Alignment, Element, Length, Task,
+    widget::{button, column, container, row, scrollable, text},
+};
+use liana_probe::Probe;
 use rig::{
     OneOrMany,
     agent::Text,
     completion::{Prompt, PromptError},
     message::{AssistantContent, Message, UserContent},
 };
-use tokio::sync::mpsc;
 
 use crate::{
-    App,
-    memory::{self, Memory, SUMMARY_PROMPT},
-    state::State,
+    llm::LLM,
+    memory::{self, SUMMARY_PROMPT},
+    probe,
 };
 
 pub struct Chat {
     pub messages: Vec<Message>,
+    markdown_states: Vec<MarkState>,
     pub config: Config,
-    pub receiver: mpsc::Receiver<TaskResult>,
-    pub sender: mpsc::Sender<TaskResult>,
-    pub markdown_cache: CommonMarkCache,
     pub parent_memory: Option<memory::NodeId>,
     pub busy: bool,
 }
 
 impl Default for Chat {
     fn default() -> Self {
-        let (sender, receiver) = mpsc::channel(1);
         Self {
-            messages: Default::default(),
-            config: Default::default(),
-            receiver,
-            sender,
-            markdown_cache: Default::default(),
-            parent_memory: Default::default(),
+            messages: Vec::new(),
+            markdown_states: Vec::new(),
+            config: Config::default(),
+            parent_memory: None,
             busy: false,
         }
     }
 }
 
-pub enum TaskResult {
-    Message(Result<String, PromptError>),
-    Summary(Result<String, PromptError>),
+#[derive(Debug, Clone)]
+pub enum ChatMessage {
+    Run,
+    ConfigProbe(probe::ProbeMsg<ConfigProbeMsg>),
+    Response(Result<String, String>),
 }
 
-#[derive(EguiProbe)]
-#[egui_probe(tags inlined)]
+#[derive(Debug, Clone, Probe)]
+#[probe(tags = "inlined")]
 pub enum Config {
     Message(MessageConfig),
     Summary,
@@ -60,140 +59,95 @@ impl Default for Config {
     }
 }
 
-#[derive(Default, EguiProbe)]
-#[egui_probe(transparent)]
+#[derive(Debug, Clone, Default, Probe)]
 pub struct MessageConfig {
-    #[egui_probe(with Self::ui_message)]
+    #[probe(kind = "Multiline")]
     pub message: String,
 }
 
-impl MessageConfig {
-    fn ui_message(message: &mut String, ui: &mut Ui, _: &Style) -> Response {
-        ui.add_sized(
-            vec2(ui.available_width(), 0.0),
-            TextEdit::multiline(message),
-        )
-    }
-}
-
 impl Chat {
-    fn context<'a>(
+    pub fn context<'a>(
         parent_memory: Option<memory::NodeId>,
         messages: &'a Vec<Message>,
-        app: &'a App,
+        memory_manager: &'a memory::Manager,
     ) -> impl Iterator<Item = Message> {
-        app.memory_manager
+        memory_manager
             .messages(parent_memory)
             .chain(messages.iter().cloned())
     }
-}
 
-impl State for Chat {
-    fn ui_remainder(&mut self, ui: &mut eframe::egui::Ui) {
-        eframe::egui::ScrollArea::vertical().show(ui, |ui| {
-            for message in &self.messages {
-                match message {
-                    Message::User { content } => {
-                        ui.label("You");
-                        for item in content.iter() {
-                            if let UserContent::Text(text) = item {
-                                ui.label(&text.text);
-                            }
-                        }
+    pub fn update(
+        &mut self,
+        message: ChatMessage,
+        llm: &Arc<LLM>,
+        memory_manager: &mut memory::Manager,
+    ) -> Task<ChatMessage> {
+        match message {
+            ChatMessage::Run => {
+                if self.busy {
+                    return Task::none();
+                }
+                self.busy = true;
+
+                match &mut self.config {
+                    Config::Message(config) => {
+                        let message_text = std::mem::take(&mut config.message);
+                        let llm = Arc::clone(llm);
+                        let history =
+                            Self::context(self.parent_memory, &self.messages, memory_manager)
+                                .collect::<Vec<_>>();
+
+                        self.messages.push(Message::User {
+                            content: OneOrMany::one(UserContent::Text(Text {
+                                text: message_text.clone(),
+                                ..Default::default()
+                            })),
+                        });
+                        self.markdown_states.push(MarkState::default());
+
+                        Task::perform(
+                            async move {
+                                llm.prompt(message_text)
+                                    .history(history)
+                                    .await
+                                    .map_err(|e: PromptError| e.to_string())
+                            },
+                            ChatMessage::Response,
+                        )
                     }
-                    Message::System { content } => {
-                        ui.label("System");
-                        ui.label(content);
-                    }
-                    Message::Assistant { content, .. } => {
-                        ui.label("Liana");
-                        for item in content.iter() {
-                            if let AssistantContent::Text(text) = item {
-                                CommonMarkViewer::new().show(
-                                    ui,
-                                    &mut self.markdown_cache,
-                                    &text.text,
-                                );
-                            }
-                        }
+                    Config::Summary => {
+                        let llm = Arc::clone(llm);
+                        let history =
+                            Self::context(self.parent_memory, &self.messages, memory_manager)
+                                .collect::<Vec<_>>();
+
+                        self.messages.push(Message::User {
+                            content: OneOrMany::one(UserContent::Text(Text {
+                                text: SUMMARY_PROMPT.to_string(),
+                                ..Default::default()
+                            })),
+                        });
+                        self.markdown_states.push(MarkState::default());
+
+                        Task::perform(
+                            async move {
+                                llm.prompt(SUMMARY_PROMPT)
+                                    .history(history)
+                                    .await
+                                    .map_err(|e: PromptError| e.to_string())
+                            },
+                            ChatMessage::Response,
+                        )
                     }
                 }
             }
-        });
-    }
-
-    fn ui(&mut self, ui: &mut eframe::egui::Ui) {
-        Probe::new(&mut self.config).show(ui);
-    }
-
-    fn run(&mut self, app: &mut App) {
-        if self.busy {
-            return;
-        }
-        self.busy = true;
-        let &mut Chat {
-            ref mut config,
-            ref mut messages,
-            ref sender,
-            ..
-        } = self;
-        match config {
-            Config::Message(config) => {
-                let message = &mut config.message;
-                {
-                    let llm = app.llm.clone();
-                    let message = message.clone();
-                    let messages =
-                        Self::context(self.parent_memory, messages, app).collect::<Vec<_>>();
-                    let sender = sender.clone();
-                    tokio::spawn(async move {
-                        sender
-                            .send(TaskResult::Message(
-                                llm.prompt(message).history(messages).await,
-                            ))
-                            .await
-                            .unwrap();
-                    })
-                };
-                messages.push(Message::User {
-                    content: OneOrMany::one(UserContent::Text(Text {
-                        text: std::mem::take(message),
-                        ..Default::default()
-                    })),
-                });
-            }
-            Config::Summary => {
-                let message = SUMMARY_PROMPT;
-                {
-                    let llm = app.llm.clone();
-                    let messages =
-                        Self::context(self.parent_memory, messages, app).collect::<Vec<_>>();
-                    let sender = sender.clone();
-                    tokio::spawn(async move {
-                        sender
-                            .send(TaskResult::Message(
-                                llm.prompt(message).history(messages).await,
-                            ))
-                            .await
-                            .unwrap();
-                    })
-                };
-                messages.push(Message::User {
-                    content: OneOrMany::one(UserContent::Text(Text {
-                        text: message.to_string(),
-                        ..Default::default()
-                    })),
-                });
-            }
-        };
-    }
-
-    fn poll(&mut self, app: &mut App) {
-        while let Ok(result) = self.receiver.try_recv() {
-            self.busy = false;
-            match result {
-                TaskResult::Message(response) => match response {
+            ChatMessage::Response(result) => {
+                self.busy = false;
+                match result {
                     Ok(response) => {
+                        self.markdown_states.push(
+                            MarkState::with_html_and_markdown(&response),
+                        );
                         self.messages.push(Message::Assistant {
                             id: None,
                             content: OneOrMany::one(AssistantContent::Text(Text {
@@ -203,21 +157,82 @@ impl State for Chat {
                         });
                     }
                     Err(err) => {
-                        println!("{}", err)
+                        eprintln!("LLM error: {}", err);
                     }
-                },
-                TaskResult::Summary(response) => match response {
-                    Ok(response) => {
-                        app.memory_manager.add_memory(
-                            Memory::new(mem::take(&mut self.messages), response),
-                            self.parent_memory,
-                        );
-                    }
-                    Err(err) => {
-                        println!("{}", err)
-                    }
-                },
+                }
+                Task::none()
+            }
+            ChatMessage::ConfigProbe(msg) => {
+                probe::probe_update(&mut self.config, msg);
+                Task::none()
             }
         }
     }
+
+    pub fn view(&self) -> Element<'_, ChatMessage> {
+        column![
+            scrollable(column(
+                self.messages
+                    .iter()
+                    .enumerate()
+                    .map(|(i, msg)| render_message(i, msg, &self.markdown_states))
+                    .collect::<Vec<_>>()
+            )
+            .spacing(12))
+            .height(Length::Fill),
+            container(
+                row![
+                    probe::probe_view(&self.config).map(ChatMessage::ConfigProbe),
+                    button(text("run"))
+                        .on_press(ChatMessage::Run)
+                        .width(Length::Shrink),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            )
+            .padding(8),
+        ]
+        .into()
+    }
 }
+
+fn render_message<'a>(
+    index: usize,
+    message: &Message,
+    states: &'a [MarkState],
+) -> Element<'a, ChatMessage> {
+    match message {
+        Message::User { content } => {
+            let texts: Vec<String> = content
+                .iter()
+                .filter_map(|item| {
+                    if let UserContent::Text(text) = item {
+                        Some(text.text.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            column![text("You").size(14), text(texts.join("\n"))]
+                .spacing(4)
+                .into()
+        }
+        Message::System { content } => {
+            column![text("System").size(14), text(content.clone())]
+                .spacing(4)
+                .into()
+        }
+        Message::Assistant { .. } => {
+            let md_widget: Element<'a, ChatMessage> = if index < states.len() {
+                MarkWidget::new(&states[index]).into()
+            } else {
+                text("").into()
+            };
+            column![text("Liana").size(14), md_widget]
+                .spacing(4)
+                .into()
+        }
+    }
+}
+
+

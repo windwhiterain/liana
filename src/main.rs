@@ -1,15 +1,12 @@
-use eframe::egui;
-use liana::App;
+use iced::window;
 
-#[tokio::main]
-async fn main() {
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([320.0, 240.0]),
-        ..Default::default()
-    };
-    eframe::run_native(
-        "Liana",
-        options,
-        Box::new(|_| {Ok(Box::new(App::new()))}),
-    ).unwrap();
+fn main() -> iced::Result {
+    iced::application(liana::init, liana::update, liana::view)
+        .window(window::Settings {
+            size: iced::Size::new(800.0, 600.0),
+            ..Default::default()
+        })
+        .theme(liana::theme)
+        .antialiasing(true)
+        .run()
 }

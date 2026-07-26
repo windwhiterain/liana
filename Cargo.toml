@@ -5,11 +5,11 @@ edition = "2024"
 
 [dependencies]
 dirs = "6"
-eframe = "0.35.0"
-egui-probe = { version = "0.12.0", features = ["derive"] }
-egui_commonmark = "0.24"
+frostmark = "0.3"
+iced = "0.14"
 image = { version = "0.25", default-features = false, features = ["png"] }
 indoc = "2.0.7"
+liana-probe = { path = "liana-probe" }
 rig = "0.40.0"
 rig-memory = "0.40.0"
 serde = { version = "1", features = ["derive"] }
