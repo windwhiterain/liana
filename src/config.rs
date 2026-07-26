@@ -4,8 +4,7 @@ use std::path::PathBuf;
 pub struct Config {
     pub base_url: String,
     pub api_key: String,
-    #[serde(default)]
-    pub model: Option<String>,
+    pub model: String,
 }
 
 pub fn load_config() -> Config {

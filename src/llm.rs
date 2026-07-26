@@ -1,8 +1,10 @@
-use rig::{client::Client, providers::openai};
+use rig::{client::CompletionClient, providers::openai};
 
 use crate::config::Config;
 
-pub type LLM = Client<openai::OpenAIResponsesExt>;
+pub type LLM = rig::agent::AgentBuilder<
+    rig::providers::openai::responses_api::GenericResponsesCompletionModel,
+>;
 
 pub fn llm_from_config(config: &Config) -> LLM {
     openai::Client::builder()
@@ -10,4 +12,5 @@ pub fn llm_from_config(config: &Config) -> LLM {
         .base_url(&config.base_url)
         .build()
         .expect("Failed to build LLM client")
+        .agent(&config.model)
 }

@@ -1,6 +1,7 @@
 # Liana
 An opinioned agent harness, exporing new things.
-## Developing Principles
-- No massive vibe coding.
+## Philosophy
+- LLM contribution must be human polished.
+- Less prompt is more.
 ## Features
-- Cache hit aware memory management.
+- Memory management with cache hit awareness.
