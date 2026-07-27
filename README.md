@@ -1,5 +1,13 @@
+<div align = "center">
+<img src="logo.png" width="200">
+
 # Liana
-An opinioned agent harness, exporing new things.
+
+*opinioned agent harness, exporing new things*
+
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg) ![Contributions](https://img.shields.io/badge/contributions-welcome-brightgreen)
+
+</div>
 
 ## Explorations
 
