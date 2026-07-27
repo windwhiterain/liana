@@ -1,3 +1,4 @@
+use iced::Padding;
 use iced::widget::markdown;
 use iced::{
     Alignment, Element, Length, Task, Theme,
@@ -18,7 +19,7 @@ use crate::{
 };
 
 pub struct Chat {
-    pub config: Config,
+    pub config: Data,
     busy: Busy,
     streaming_text: String,
     streaming_reasoning: String,
@@ -30,7 +31,7 @@ pub struct Chat {
 impl Default for Chat {
     fn default() -> Self {
         Self {
-            config: Config::default(),
+            config: Data::default(),
             busy: Busy::Idle,
             streaming_text: String::new(),
             streaming_reasoning: String::new(),
@@ -44,41 +45,58 @@ impl Default for Chat {
 #[derive(Debug, Clone)]
 pub enum ChatMessage {
     Run,
-    ConfigProbe(probe::ProbeMsg<ConfigProbeMsg>),
+    Clear,
+    Remove(usize),
+    ConfigProbe(probe::ProbeMsg<DataProbeMsg>),
     StreamIntent(StreamIntent),
     ToggleReasoning,
     LinkClicked(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Busy { Idle, Message, Summary }
-
-#[derive(Debug, Clone, Probe)]
-#[probe(tags = "inlined")]
-pub enum Config {
-    Message(MessageConfig),
+enum Busy {
+    Idle,
+    Message,
     Summary,
 }
 
-impl Default for Config {
+#[derive(Debug, Clone, Probe)]
+#[probe(tabs)]
+pub struct Data {
+    #[probe(label = "Chat")]
+    pub message: ChatData,
+    #[probe(label = "Summary")]
+    pub summary: SummaryData,
+    #[probe(tab_index)]
+    pub active_tab: usize,
+}
+
+impl Default for Data {
     fn default() -> Self {
-        Self::Message(MessageConfig::default())
+        Self {
+            message: ChatData::default(),
+            summary: SummaryData,
+            active_tab: 0,
+        }
     }
 }
 
 #[derive(Debug, Clone, Probe)]
-pub struct MessageConfig {
+pub struct ChatData {
     #[probe(hide_label)]
     pub message: probe::TextEditor,
 }
 
-impl Default for MessageConfig {
+impl Default for ChatData {
     fn default() -> Self {
         Self {
             message: probe::TextEditor::new(),
         }
     }
 }
+
+#[derive(Debug, Clone, Default, Probe)]
+pub struct SummaryData;
 
 impl Chat {
     pub fn context<'a>(data: &'a crate::Data) -> impl Iterator<Item = Message> {
@@ -102,10 +120,10 @@ impl State for Chat {
                     return (Task::none(), None);
                 }
 
-                match &mut self.config {
-                    Config::Message(config) => {
-                        let message_text = config.message.text().to_string();
-                        config.message = probe::TextEditor::new();
+                match self.config.active_tab {
+                    0 => {
+                        let message_text = self.config.message.message.text().to_string();
+                        self.config.message.message = probe::TextEditor::new();
                         let history = Self::context(data).collect::<Vec<_>>();
 
                         data.messages.push(Message::User {
@@ -133,7 +151,7 @@ impl State for Chat {
                             None,
                         )
                     }
-                    Config::Summary => {
+                    1 => {
                         let history = Self::context(data).collect::<Vec<_>>();
 
                         data.messages.push(Message::User {
@@ -161,15 +179,32 @@ impl State for Chat {
                             None,
                         )
                     }
+                    _ => (Task::none(), None),
                 }
             }
             ChatMessage::ConfigProbe(msg) => {
                 probe::probe_update(&mut self.config, msg);
                 (Task::none(), None)
             }
-            ChatMessage::StreamIntent(_) => {
+            ChatMessage::Clear => {
+                data.messages.clear();
+                data.markdown_states.clear();
+                data.reasoning_markdown_states.clear();
                 (Task::none(), None)
             }
+            ChatMessage::Remove(i) => {
+                if i < data.messages.len() {
+                    data.messages.remove(i);
+                }
+                if i < data.markdown_states.len() {
+                    data.markdown_states.remove(i);
+                }
+                if i < data.reasoning_markdown_states.len() {
+                    data.reasoning_markdown_states.remove(i);
+                }
+                (Task::none(), None)
+            }
+            ChatMessage::StreamIntent(_) => (Task::none(), None),
             ChatMessage::ToggleReasoning => {
                 self.reasoning_expanded = !self.reasoning_expanded;
                 (Task::none(), None)
@@ -201,18 +236,16 @@ impl State for Chat {
 
                 match self.busy {
                     Busy::Message => {
-                        data.reasoning_markdown_states.push(if !reasoning.is_empty() {
-                            Some(markdown::parse(&reasoning).collect())
-                        } else {
-                            None
-                        });
-                        data.markdown_states
-                            .push(markdown::parse(&text).collect());
+                        data.reasoning_markdown_states
+                            .push(if !reasoning.is_empty() {
+                                Some(markdown::parse(&reasoning).collect())
+                            } else {
+                                None
+                            });
+                        data.markdown_states.push(markdown::parse(&text).collect());
                         let mut content: Vec<AssistantContent> = vec![];
                         if !reasoning.is_empty() {
-                            content.push(AssistantContent::Reasoning(
-                                Reasoning::new(&reasoning),
-                            ));
+                            content.push(AssistantContent::Reasoning(Reasoning::new(&reasoning)));
                         }
                         content.push(AssistantContent::Text(Text {
                             text,
@@ -238,14 +271,11 @@ impl State for Chat {
                         data.reasoning_markdown_states.clear();
                         let memory = memory::Memory::new(messages, text);
                         data.memory_manager.add_memory(memory, data.parent_memory);
-                        data.parent_memory = data.memory_manager
-                            .memories
-                            .last()
-                            .and_then(|m| {
-                                data.memory_markdowns
-                                    .push(markdown::parse(&m.summary).collect());
-                                m.nodes.last().copied()
-                            });
+                        data.parent_memory = data.memory_manager.memories.last().and_then(|m| {
+                            data.memory_markdowns
+                                .push(markdown::parse(&m.summary).collect());
+                            m.nodes.last().copied()
+                        });
                     }
                     Busy::Idle => {}
                 }
@@ -282,7 +312,8 @@ impl State for Chat {
             })
             .collect();
 
-        if self.busy != Busy::Idle && (!self.streaming_text.is_empty() || !self.streaming_reasoning.is_empty())
+        if self.busy != Busy::Idle
+            && (!self.streaming_text.is_empty() || !self.streaming_reasoning.is_empty())
         {
             message_items.push(render_streaming(
                 &self.streaming_reasoning,
@@ -303,9 +334,19 @@ impl State for Chat {
             container(
                 row![
                     probe::probe_view(&self.config).map(ChatMessage::ConfigProbe),
-                    button(text("run"))
-                        .on_press_maybe(if self.busy != Busy::Idle { None } else { Some(ChatMessage::Run) })
-                        .width(Length::Shrink),
+                    column![
+                        button(text("run"))
+                            .on_press_maybe(if self.busy != Busy::Idle {
+                                None
+                            } else {
+                                Some(ChatMessage::Run)
+                            })
+                            .width(Length::Shrink),
+                        button(text("clear"))
+                            .on_press(ChatMessage::Clear)
+                            .width(Length::Shrink),
+                    ]
+                    .spacing(4),
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center),
@@ -325,6 +366,9 @@ fn render_message<'a>(
     reasoning_states: &'a [Option<Vec<markdown::Item>>],
     reasoning_expanded: bool,
 ) -> Element<'a, ChatMessage> {
+    let remove_btn = button(text("×"))
+        .on_press(ChatMessage::Remove(index))
+        .padding(Padding::default().vertical(0).horizontal(1));
     match message {
         Message::User { content } => {
             let texts: Vec<String> = content
@@ -337,26 +381,34 @@ fn render_message<'a>(
                     }
                 })
                 .collect();
-            column![text("You").size(14), text(texts.join("\n"))]
-                .spacing(4)
-                .into()
+            column![
+                row![remove_btn, text("You").size(14)].spacing(2),
+                text(texts.join("\n"))
+            ]
+            .spacing(4)
+            .into()
         }
-        Message::System { content } => {
-            column![text("System").size(14), text(content.clone())]
-                .spacing(4)
-                .into()
-        }
-        Message::Assistant { content: assistant_content, .. } => {
+        Message::System { content } => column![
+            row![remove_btn, text("System").size(14)].spacing(2),
+            text(content.clone())
+        ]
+        .spacing(4)
+        .into(),
+        Message::Assistant {
+            content: assistant_content,
+            ..
+        } => {
             if index >= states.len() {
                 return text("").into();
             }
             let mut items: Vec<Element<'a, ChatMessage>> = vec![];
-
-            for c in assistant_content.iter() {
-                match c {
+            let mut contents = column![];
+            for content in assistant_content.iter() {
+                match content {
                     AssistantContent::Reasoning(_) => {
                         if let Some(Some(reasoning_md)) = reasoning_states.get(index) {
-                            items.push(render_reasoning_section(reasoning_md, reasoning_expanded));
+                            contents = contents
+                                .push(render_reasoning_section(reasoning_md, reasoning_expanded));
                         }
                     }
                     _ => {}
@@ -366,8 +418,16 @@ fn render_message<'a>(
             let md_widget: Element<'a, ChatMessage> = markdown::view(&states[index], Theme::Dark)
                 .map(|_| ChatMessage::LinkClicked(String::new()))
                 .into();
-            items.push(column![text("Liana").size(14), md_widget].spacing(4).into());
-            column(items).spacing(8).into()
+            contents = contents.push(md_widget);
+            items.push(
+                column![
+                    row![remove_btn, text("Liana").size(14)].spacing(2),
+                    contents
+                ]
+                .spacing(4)
+                .into(),
+            );
+            column(items).spacing(4).align_x(Alignment::Start).into()
         }
     }
 }
@@ -396,8 +456,7 @@ fn render_reasoning_section<'a>(
             })
             .into();
         column![
-            button(text("Hide thinking"))
-                .on_press(ChatMessage::ToggleReasoning),
+            button(text("Hide thinking")).on_press(ChatMessage::ToggleReasoning),
             boxed,
         ]
         .spacing(4)
@@ -439,8 +498,7 @@ fn render_streaming<'a>(
                 .into();
             children.push(
                 column![
-                    button(text("Hide thinking"))
-                        .on_press(ChatMessage::ToggleReasoning),
+                    button(text("Hide thinking")).on_press(ChatMessage::ToggleReasoning),
                     boxed,
                 ]
                 .spacing(4)
@@ -458,11 +516,7 @@ fn render_streaming<'a>(
         let md: Element<'a, ChatMessage> = markdown::view(response_md, Theme::Dark)
             .map(|_| ChatMessage::LinkClicked(String::new()))
             .into();
-        children.push(
-            column![text("Streaming...").size(12), md]
-                .spacing(4)
-                .into(),
-        );
+        children.push(column![text("Streaming...").size(12), md].spacing(4).into());
     }
     column(children).spacing(8).into()
 }

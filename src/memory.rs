@@ -5,7 +5,7 @@ use rig::{
     message::{AssistantContent, UserContent},
 };
 use rig_memory::{HeuristicTokenCounter, TokenCounter};
-use std::{collections::HashSet, fmt::Display};
+use std::{collections::HashSet, fmt::Display, mem};
 
 pub const LIST_MEMORY_PROMPT: &str = "I don't have enough memory in context, I need to select relevant memories from list:";
 
@@ -180,6 +180,87 @@ impl Manager {
         };
         (node_id, theory_cache, memory_sparsity)
     }
+    pub fn remove_memory(&mut self, memory_id: MemoryId) {
+        let mut removed_nodes = HashSet::new();
+        for &node_id in &self.memories[memory_id.0].nodes {
+            collect_subtree(node_id, &self.nodes, &mut removed_nodes);
+        }
+
+        let mut new_node_idx = 0;
+        let node_remap: Vec<Option<usize>> = (0..self.nodes.len())
+            .map(|i| {
+                if removed_nodes.contains(&NodeId(i)) {
+                    None
+                } else {
+                    let idx = new_node_idx;
+                    new_node_idx += 1;
+                    Some(idx)
+                }
+            })
+            .collect();
+
+        let mut new_mem_idx = 0;
+        let mem_remap: Vec<Option<usize>> = (0..self.memories.len())
+            .map(|i| {
+                if i == memory_id.0 {
+                    None
+                } else {
+                    let idx = new_mem_idx;
+                    new_mem_idx += 1;
+                    Some(idx)
+                }
+            })
+            .collect();
+
+        let old_nodes = mem::take(&mut self.nodes);
+        self.nodes = old_nodes
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| node_remap[*i].is_some())
+            .map(|(_, node)| Node {
+                memory: MemoryId(mem_remap[node.memory.0].unwrap()),
+                parent: node.parent.and_then(|p| node_remap[p.0].map(NodeId)),
+                children: node
+                    .children
+                    .into_iter()
+                    .filter_map(|c| node_remap[c.0].map(NodeId))
+                    .collect(),
+                size: 0,
+            })
+            .collect();
+
+        for i in 0..self.nodes.len() {
+            let memory_size = self.memories[self.nodes[i].memory.0].size;
+            let parent_size = self.nodes[i].parent.map_or(0, |p| self.nodes[p.0].size);
+            self.nodes[i].size = parent_size + memory_size;
+        }
+
+        let old_memories = mem::take(&mut self.memories);
+        self.memories = old_memories
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| mem_remap[*i].is_some())
+            .map(|(_, mem)| Memory {
+                nodes: mem
+                    .nodes
+                    .into_iter()
+                    .filter_map(|n| node_remap[n.0].map(NodeId))
+                    .collect(),
+                ..mem
+            })
+            .collect();
+
+        self.last_memory = self.last_memory.and_then(|m| {
+            if m == memory_id {
+                None
+            } else {
+                Some(MemoryId(mem_remap[m.0].unwrap()))
+            }
+        });
+
+        self.size = self.memories.iter().map(|m| m.size).sum();
+    }
+
     fn add_node(&mut self, memory_id: MemoryId, parent: Option<NodeId>) -> NodeId {
         let memory = &self.memories[memory_id.0];
         let id = NodeId(self.nodes.len());
@@ -236,7 +317,14 @@ impl<'a, T: IntoIterator<Item = (usize, &'a Memory)> + Clone> Display for ListMe
     }
 }
 
+fn collect_subtree(node: NodeId, nodes: &[Node], set: &mut HashSet<NodeId>) {
+    set.insert(node);
+    for &child in &nodes[node.0].children {
+        collect_subtree(child, nodes, set);
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct NodeId(usize);
+pub struct NodeId(pub usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct MemoryId(usize);
+pub struct MemoryId(pub usize);

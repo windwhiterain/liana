@@ -1,3 +1,4 @@
+use iced::Padding;
 use iced::widget::markdown;
 use iced::{
     Element, Length, Task, Theme,
@@ -14,7 +15,7 @@ use crate::{
 };
 
 pub struct Recall {
-    pub config: Config,
+    pub config: Data,
     checked: Vec<bool>,
     busy: bool,
     streaming_text: String,
@@ -27,32 +28,41 @@ pub struct Recall {
 pub enum RecallMessage {
     Run,
     Toggle(usize, bool),
-    ConfigProbe(probe::ProbeMsg<ConfigProbeMsg>),
+    Remove(usize),
+    ConfigProbe(probe::ProbeMsg<DataProbeMsg>),
     StreamIntent(StreamIntent),
     ToggleReasoning,
     LinkClicked(String),
 }
 
 #[derive(Debug, Clone, Probe)]
-#[probe(tags = "inlined")]
-pub enum Config {
-    LLM(LLMConfig),
-    Confirm,
+#[probe(tabs)]
+pub struct Data {
+    #[probe(label = "LLM")]
+    pub llm: LLMData,
+    #[probe(label = "Confirm")]
+    pub confirm: ConfirmData,
+    #[probe(tab_index)]
+    pub active_tab: usize,
 }
 
-impl Default for Config {
+impl Default for Data {
     fn default() -> Self {
-        Self::LLM(LLMConfig::default())
+        Self {
+            llm: LLMData::default(),
+            confirm: ConfirmData,
+            active_tab: 0,
+        }
     }
 }
 
 #[derive(Debug, Clone, Probe)]
-pub struct LLMConfig {
+pub struct LLMData {
     #[probe(hide_label)]
     pub question: probe::TextEditor,
 }
 
-impl Default for LLMConfig {
+impl Default for LLMData {
     fn default() -> Self {
         Self {
             question: probe::TextEditor::new(),
@@ -60,10 +70,13 @@ impl Default for LLMConfig {
     }
 }
 
+#[derive(Debug, Clone, Default, Probe)]
+pub struct ConfirmData;
+
 impl Recall {
     pub fn new(memory_manager: &memory::Manager) -> Self {
         Self {
-            config: Config::default(),
+            config: Data::default(),
             checked: vec![false; memory_manager.memories.len()],
             busy: false,
             streaming_text: String::new(),
@@ -98,20 +111,29 @@ impl State for Recall {
                 }
                 (Task::none(), None)
             }
+            RecallMessage::Remove(i) => {
+                if i < data.memory_manager.memories.len() {
+                    data.memory_manager.remove_memory(memory::MemoryId(i));
+                    self.checked.remove(i);
+                    data.memory_markdowns.remove(i);
+                    data.parent_memory = None;
+                }
+                (Task::none(), None)
+            }
             RecallMessage::ToggleReasoning => {
                 self.reasoning_expanded = !self.reasoning_expanded;
                 (Task::none(), None)
             }
-            RecallMessage::Run => match &mut self.config {
-                Config::LLM(llm_config) => {
+            RecallMessage::Run => match self.config.active_tab {
+                0 => {
                     if self.busy {
                         return (Task::none(), None);
                     }
-                    let question_text = llm_config.question.text().to_string();
+                    let question_text = self.config.llm.question.text().to_string();
                     if question_text.trim().is_empty() {
                         return (Task::none(), None);
                     }
-                    llm_config.question = probe::TextEditor::new();
+                    self.config.llm.question = probe::TextEditor::new();
                     self.busy = true;
                     self.streaming_text.clear();
                     self.streaming_reasoning.clear();
@@ -140,7 +162,7 @@ impl State for Recall {
                         None,
                     )
                 }
-                Config::Confirm => {
+                1 => {
                     let indices: Vec<usize> = self
                         .checked
                         .iter()
@@ -156,12 +178,14 @@ impl State for Recall {
                     data.messages.clear();
                     data.markdown_states.clear();
                     data.reasoning_markdown_states.clear();
-                    (Task::none(), Some(std::any::TypeId::of::<super::chat::Chat>()))
+                    (
+                        Task::none(),
+                        Some(std::any::TypeId::of::<super::chat::Chat>()),
+                    )
                 }
+                _ => (Task::none(), None),
             },
-            RecallMessage::StreamIntent(_) => {
-                (Task::none(), None)
-            }
+            RecallMessage::StreamIntent(_) => (Task::none(), None),
             RecallMessage::LinkClicked(_) => (Task::none(), None),
         }
     }
@@ -220,10 +244,15 @@ impl State for Recall {
             };
             memory_items.push(
                 row![
-                    toggler(checked).on_toggle(move |v| RecallMessage::Toggle(i, v)),
+                    column![
+                        toggler(checked).on_toggle(move |v| RecallMessage::Toggle(i, v)),
+                        button(text("×"))
+                            .on_press(RecallMessage::Remove(i))
+                            .padding(Padding::default().vertical(0).horizontal(1)),
+                    ].spacing(2),
                     md,
                 ]
-                .spacing(8)
+                .spacing(4)
                 .into(),
             );
         }
@@ -290,7 +319,11 @@ impl State for Recall {
                 .width(Length::Shrink)
                 .into(),
         ];
-        children.push(container(column(bottom).spacing(8)).padding(8).into());
+        children.push(
+            container(row(bottom).spacing(8).align_y(iced::Alignment::Center))
+                .padding(8)
+                .into(),
+        );
 
         column(children).into()
     }

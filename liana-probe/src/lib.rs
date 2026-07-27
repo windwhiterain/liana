@@ -9,10 +9,15 @@ pub fn derive_probe(input: TokenStream) -> TokenStream {
     let msg_name = format_ident!("{}ProbeMsg", name);
 
     let probe_attrs = parse_probe_attrs(&input.attrs);
-    let _tags_inlined = probe_attrs.tags_inlined;
 
     match &input.data {
-        Data::Struct(data) => derive_struct(name, &msg_name, data),
+        Data::Struct(data) => {
+            if probe_attrs.tabs {
+                derive_tabs_struct(name, &msg_name, data)
+            } else {
+                derive_struct(name, &msg_name, data)
+            }
+        }
         Data::Enum(data) => derive_enum(name, &msg_name, data),
         Data::Union(_) => panic!("#[derive(Probe)] does not support unions"),
     }
@@ -26,7 +31,28 @@ fn derive_struct(
 ) -> proc_macro2::TokenStream {
     let fields = match &data.fields {
         Fields::Named(fields) => &fields.named,
-        _ => panic!("#[derive(Probe)] only supports named fields on structs"),
+        Fields::Unit => {
+            return quote! {
+                #[derive(Debug, Clone)]
+                #[doc(hidden)]
+                pub enum #msg_name {}
+
+                impl crate::probe::Probe for #name {
+                    type ChildMsg = #msg_name;
+
+                    fn describe(&self) -> Vec<crate::probe::FieldInfo> {
+                        vec![]
+                    }
+
+                    fn field_value<'a>(&'a self, _index: usize) -> crate::probe::FieldValue<'a> {
+                        crate::probe::FieldValue::String(String::new())
+                    }
+
+                    fn apply(&mut self, _msg: crate::probe::ProbeMsg<Self::ChildMsg>) {}
+                }
+            };
+        }
+        _ => panic!("#[derive(Probe)] only supports named or unit structs"),
     };
 
     let field_names: Vec<_> = fields.iter().map(|f| f.ident.as_ref().unwrap()).collect();
@@ -101,6 +127,130 @@ fn derive_struct(
                     #(#apply_arms)*
                     _ => {}
                 }
+            }
+        }
+    }
+}
+
+fn derive_tabs_struct(
+    name: &syn::Ident,
+    msg_name: &syn::Ident,
+    data: &syn::DataStruct,
+) -> proc_macro2::TokenStream {
+    let fields = match &data.fields {
+        Fields::Named(fields) => &fields.named,
+        _ => panic!("#[derive(Probe)] tabs mode only supports named fields on structs"),
+    };
+
+    // Find the tab_index field
+    let tab_index_field = fields.iter().find(|f| parse_field_attrs(&f.attrs).tab_index);
+    let tab_index_name = match tab_index_field {
+        Some(f) => f.ident.as_ref().unwrap(),
+        None => panic!("#[probe(tabs)] requires a field annotated with #[probe(tab_index)]"),
+    };
+
+    // Tab fields: all named fields except the tab_index field
+    let tab_fields: Vec<_> = fields
+        .iter()
+        .filter(|f| !parse_field_attrs(&f.attrs).tab_index)
+        .collect();
+
+    if tab_fields.is_empty() {
+        panic!("#[probe(tabs)] requires at least one non-tab_index field");
+    }
+
+    let tab_names: Vec<_> = tab_fields.iter().map(|f| f.ident.as_ref().unwrap()).collect();
+    let tab_labels: Vec<_> = tab_fields.iter().map(|f| {
+        let attrs = parse_field_attrs(&f.attrs);
+        attrs.label.unwrap_or_else(|| f.ident.as_ref().unwrap().to_string())
+    }).collect();
+
+    // describe: delegate to active tab field
+    let describe_arms: Vec<_> = tab_names.iter().enumerate().map(|(i, tname)| {
+        quote! { #i => self.#tname.describe(), }
+    }).collect();
+
+    // field_value: delegate to active tab field
+    let field_value_arms: Vec<_> = tab_names.iter().enumerate().map(|(i, tname)| {
+        quote! { #i => self.#tname.field_value(index), }
+    }).collect();
+
+    // SetString delegate
+    let set_string_arms: Vec<_> = tab_names.iter().enumerate().map(|(i, tname)| {
+        quote! {
+            #i => self.#tname.apply(crate::probe::ProbeMsg::SetString { index, value }),
+        }
+    }).collect();
+
+    // SetBool delegate
+    let set_bool_arms: Vec<_> = tab_names.iter().enumerate().map(|(i, tname)| {
+        quote! {
+            #i => self.#tname.apply(crate::probe::ProbeMsg::SetBool { index, value }),
+        }
+    }).collect();
+
+    // TextAction delegate
+    let text_action_arms: Vec<_> = tab_names.iter().enumerate().map(|(i, tname)| {
+        quote! {
+            #i => self.#tname.apply(crate::probe::ProbeMsg::TextAction { index, action }),
+        }
+    }).collect();
+
+    quote! {
+        #[derive(Debug, Clone)]
+        #[doc(hidden)]
+        pub enum #msg_name {}
+
+        impl crate::probe::Probe for #name {
+            type ChildMsg = #msg_name;
+
+            fn describe(&self) -> Vec<crate::probe::FieldInfo> {
+                match self.#tab_index_name {
+                    #(#describe_arms)*
+                    _ => vec![],
+                }
+            }
+
+            fn field_value<'a>(&'a self, index: usize) -> crate::probe::FieldValue<'a> {
+                match self.#tab_index_name {
+                    #(#field_value_arms)*
+                    _ => crate::probe::FieldValue::String(String::new()),
+                }
+            }
+
+            fn apply(&mut self, msg: crate::probe::ProbeMsg<Self::ChildMsg>) {
+                match msg {
+                    crate::probe::ProbeMsg::SelectVariant { index } => {
+                        self.#tab_index_name = index;
+                    }
+                    crate::probe::ProbeMsg::SetString { index, value } => {
+                        match self.#tab_index_name {
+                            #(#set_string_arms)*
+                            _ => {}
+                        }
+                    }
+                    crate::probe::ProbeMsg::SetBool { index, value } => {
+                        match self.#tab_index_name {
+                            #(#set_bool_arms)*
+                            _ => {}
+                        }
+                    }
+                    crate::probe::ProbeMsg::TextAction { index, action } => {
+                        match self.#tab_index_name {
+                            #(#text_action_arms)*
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            fn variants(&self) -> Vec<&'static str> {
+                vec![#(#tab_labels),*]
+            }
+
+            fn current_variant_index(&self) -> usize {
+                self.#tab_index_name
             }
         }
     }
@@ -279,6 +429,8 @@ fn parse_probe_attrs(attrs: &[syn::Attribute]) -> ProbeAttrs {
             list.parse_nested_meta(|meta| {
                 if meta.path.is_ident("transparent") {
                     result.transparent = true;
+                } else if meta.path.is_ident("tabs") {
+                    result.tabs = true;
                 } else if meta.path.is_ident("tags") {
                     let value: LitStr = meta.value()?.parse()?;
                     result.tags_inlined = value.value() == "inlined";
@@ -294,6 +446,7 @@ fn parse_probe_attrs(attrs: &[syn::Attribute]) -> ProbeAttrs {
 struct ProbeAttrs {
     transparent: bool,
     tags_inlined: bool,
+    tabs: bool,
 }
 
 fn parse_field_attrs(attrs: &[syn::Attribute]) -> FieldAttrs {
@@ -315,6 +468,8 @@ fn parse_field_attrs(attrs: &[syn::Attribute]) -> FieldAttrs {
                     result.kind_override = Some(value.value());
                 } else if meta.path.is_ident("hide_label") {
                     result.hide_label = true;
+                } else if meta.path.is_ident("tab_index") {
+                    result.tab_index = true;
                 }
                 Ok(())
             }).ok();
@@ -329,6 +484,7 @@ struct FieldAttrs {
     label: Option<String>,
     kind_override: Option<String>,
     hide_label: bool,
+    tab_index: bool,
 }
 
 fn infer_field_kind(field: &syn::Field) -> proc_macro2::TokenStream {
