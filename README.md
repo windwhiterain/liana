@@ -3,10 +3,33 @@ An opinioned agent harness, exporing new things.
 
 ## Explorations
 
-### Cache-aware memory management
+### Cache-aware Memory Composition
 This is why this project is born.
 
-Long-running LLM agent conversations face a tension between **composability** (arbitrarily selecting subsets of past interactions as context) and **stability** (presenting the LLM with a deterministic, linearly-ordered prompt regardless of which memories are selected). Existing approaches like MemGPT (Packer et al., 2023) and MemTree (Rezazadeh et al., 2024) address memory hierarchy and tree-structured summarization, but none directly solves the combined problem. Liana resolves this by organizing conversation history as a tree of *Memory* segments (raw messages + compressed summary) and modeling context construction as a **cache-cost minimization problem**: selected memories treat their descendant subtrees as cached (zero cost), while non-descendant nodes incur a penalty proportional to their token footprint. The `find()` algorithm identifies the minimum-cost anchor node, then walks the parent chain upward to assemble a deterministic, chronologically-grounded context — the selection of memories only determines *where* uncached segments attach, never the order of the backbone.
+Agent memory management has two extremes:
+
+||composabe|stable|
+|-|-|-|
+|llm cache|low|high|
+|context sparsity|high|low|
+
+Liana use a unique method to balance them:
+
+||liana|
+|-|-|
+|llm cache|memory tree, each node is a memory|
+|related memories|constraints on tree node|
+|stable memory order|ancestor chain of tree node|
+
+Memory composition pipline:
+- select relative memories.
+- find optimal tree node.
+  - for each node:
+    - find relative memories that not inside ancestor chain.
+    - compute cost for each tree node:
+    
+      `cost(node) = cache_hit_price * ancestor_chain(node).size + cache_miss_price * missing_memories(node).size`
+- use the ancestor chain of the tree node as context.
 
 ## Philosophy
 - No LLM contribution without human polishment.
@@ -16,5 +39,5 @@ Long-running LLM agent conversations face a tension between **composability** (a
 
 1. Create `{config_dir}/liana/config.json` with your LLM credentials (`base_url`, `api_key`, `model`).
 2. Launch the app. The sidebar switches between **Chat** (conversation) and **Recall** (memory browser).
-3. In Chat, switch to **Summary** mode and press run to persist the session into memory.
-4. In Recall, use **LLM** mode to get suggested memories, or **Confirm** mode to pick manually — either way, you resume Chat with full context.
+3. In Chat, switch to **Summary** mode and press run to add the session into memory management.
+4. In Recall, you can select memories needed,  use **LLM** mode to get suggested memories, use **Confirm** mode to lauch a session with this memories to **Chat**.
