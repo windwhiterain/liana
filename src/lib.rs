@@ -1,16 +1,24 @@
-use std::any::Any;
+use std::any::TypeId;
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use futures::StreamExt;
+use iced::widget::markdown;
 use iced::{
-    Color, Element, Length, Task, Theme,
+    Element, Length, Task, Theme,
     widget::{button, column, container, row, text},
 };
+use rig::message::Message as RigMessage;
 
 use crate::{
     config::{Config, load_config},
-    llm::{LLM, llm_from_config},
-    state::chat::{Chat, ChatMessage},
-    state::recall::{Recall, RecallMessage},
+    llm::{LLM, llm_from_config, llm_json_from_config},
+    state::{
+        Erased, ErasedState, Message, StreamIntent, StreamResponse,
+        chat::Chat,
+        recall::Recall,
+    },
+    stream::StreamMsg,
 };
 
 pub mod config;
@@ -18,90 +26,42 @@ pub mod llm;
 pub mod memory;
 pub mod probe;
 pub mod state;
+pub mod stream;
 
-// ── Message type (type-erased, supports dynamic state injection) ──
+// ── Shared mutable context for states ──
 
-pub type Message = Box<dyn Any + Send>;
-
-// ── State trait (non-object-safe: each state works with its own message type) ──
-
-pub trait State {
-    type Message: Any + Send + Into<Message>;
-
-    fn update(
-        &mut self,
-        message: Self::Message,
-        llm: &Arc<LLM>,
-        memory_manager: &mut memory::Manager,
-    ) -> (Task<Self::Message>, Option<Box<dyn ErasedState>>);
-
-    fn view<'a>(&'a self, memory_manager: &'a memory::Manager) -> Element<'a, Self::Message>;
-}
-
-// ── Object-safe trait for type-erased storage ──
-
-pub trait ErasedState {
-    fn update_erased(
-        &mut self,
-        message: Message,
-        llm: &Arc<LLM>,
-        memory_manager: &mut memory::Manager,
-    ) -> (Task<Message>, Option<Box<dyn ErasedState>>);
-
-    fn view_erased<'a>(&'a self, memory_manager: &'a memory::Manager) -> Element<'a, Message>;
-}
-
-// ── Adapter: wraps a typed State, bridges Self::Message ↔ Message via downcast ──
-
-pub struct Erased<S: State> {
-    state: S,
-}
-
-impl<S: State> Erased<S> {
-    pub fn new(state: S) -> Self {
-        Self { state }
-    }
-}
-
-impl<S: State> ErasedState for Erased<S> {
-    fn update_erased(
-        &mut self,
-        message: Message,
-        llm: &Arc<LLM>,
-        memory_manager: &mut memory::Manager,
-    ) -> (Task<Message>, Option<Box<dyn ErasedState>>) {
-        match message.downcast::<S::Message>() {
-            Ok(typed) => {
-                let (task, transition) = self.state.update(*typed, llm, memory_manager);
-                (task.map(Into::into), transition)
-            }
-            Err(_) => (Task::none(), None),
-        }
-    }
-
-    fn view_erased<'a>(&'a self, memory_manager: &'a memory::Manager) -> Element<'a, Message> {
-        self.state.view(memory_manager).map(Into::into)
-    }
+pub struct Data {
+    pub llm: Arc<LLM>,
+    pub llm_json: Arc<LLM>,
+    pub memory_manager: memory::Manager,
+    // Transition params
+    pub parent_memory: Option<memory::NodeId>,
+    // Conversation state (owned by Data so Recall can clear it)
+    pub messages: Vec<RigMessage>,
+    pub markdown_states: Vec<Vec<markdown::Item>>,
+    pub reasoning_markdown_states: Vec<Option<Vec<markdown::Item>>>,
+    // Memory markdowns for Recall view (mirrors memory_manager.memories)
+    pub memory_markdowns: Vec<Vec<markdown::Item>>,
 }
 
 // ── Sidebar ──
 
 pub struct SidebarEntry {
     pub label: &'static str,
-    pub factory: Box<dyn Fn(&App) -> Box<dyn ErasedState>>,
+    pub type_id: TypeId,
 }
 
 #[derive(Debug, Clone)]
-pub struct SidebarNav(pub usize);
+pub struct SidebarNav(pub TypeId);
 
 // ── App ──
 
 pub struct App {
     pub config: Config,
-    pub llm: Arc<LLM>,
-    pub memory_manager: memory::Manager,
+    pub data: Data,
     pub sidebar: Vec<SidebarEntry>,
-    state: Box<dyn ErasedState>,
+    states: HashMap<TypeId, Box<dyn ErasedState>>,
+    active: TypeId,
 }
 
 // ── SidebarNav → Message ──
@@ -112,61 +72,107 @@ impl From<SidebarNav> for Message {
     }
 }
 
-// ── ChatMessage → Message ──
-
-impl From<ChatMessage> for Message {
-    fn from(msg: ChatMessage) -> Self {
-        Box::new(msg)
-    }
-}
-
-// ── RecallMessage → Message ──
-
-impl From<RecallMessage> for Message {
-    fn from(msg: RecallMessage) -> Self {
-        Box::new(msg)
-    }
-}
-
 // ── Entry points ──
 
 pub fn init() -> App {
     let config = load_config();
-    let llm = Arc::new(llm_from_config(&config));
+    let memory_manager = memory::Manager::default();
+    let memory_markdowns = memory_manager
+        .memories
+        .iter()
+        .map(|m| markdown::parse(&m.summary).collect())
+        .collect();
+    let data = Data {
+        llm: Arc::new(llm_from_config(&config)),
+        llm_json: Arc::new(llm_json_from_config(&config)),
+        memory_manager,
+        parent_memory: None,
+        messages: Vec::new(),
+        markdown_states: Vec::new(),
+        reasoning_markdown_states: Vec::new(),
+        memory_markdowns,
+    };
+
+    let mut states = HashMap::new();
+    let chat_id = TypeId::of::<Chat>();
+    let recall_id = TypeId::of::<Recall>();
+
+    // Recall needs memory_manager reference, created first
+    states.insert(recall_id, Box::new(Erased::new(Recall::new(&data.memory_manager))) as Box<dyn ErasedState>);
+    states.insert(chat_id, Box::new(Erased::new(Chat::default())) as Box<dyn ErasedState>);
+
     App {
         config,
-        llm,
-        memory_manager: memory::Manager::default(),
+        data,
         sidebar: vec![
-            SidebarEntry {
-                label: "Chat",
-                factory: Box::new(|_| Box::new(Erased::new(Chat::default()))),
-            },
-            SidebarEntry {
-                label: "Recall",
-                factory: Box::new(|app| Box::new(Erased::new(Recall::new(&app.memory_manager)))),
-            },
+            SidebarEntry { label: "Chat", type_id: chat_id },
+            SidebarEntry { label: "Recall", type_id: recall_id },
         ],
-        state: Box::new(Erased::new(Chat::default())),
+        states,
+        active: chat_id,
     }
 }
 
 pub fn update(app: &mut App, message: Message) -> Task<Message> {
-    match message.downcast::<SidebarNav>() {
-        Ok(nav) => {
-            if nav.0 < app.sidebar.len() {
-                app.state = (app.sidebar[nav.0].factory)(app);
-            }
-            Task::none()
+    // ── Stream service: intercept StreamIntent → spawn streaming ──
+    match message.downcast::<StreamIntent>() {
+        Ok(intent) => {
+            let owner = intent.owner;
+            let task_id = intent.task_id;
+            let llm = if intent.json {
+                Arc::clone(&app.data.llm_json)
+            } else {
+                Arc::clone(&app.data.llm)
+            };
+            let s = stream::stream_prompt(llm, intent.prompt, intent.history);
+            let stream_task = Task::stream(s.map(move |msg| {
+                Box::new(StreamResponse { owner, task_id, content: msg }) as Message
+            }));
+            let start_msg = Box::new(StreamResponse {
+                owner,
+                task_id,
+                content: StreamMsg::Started,
+            }) as Message;
+            return Task::batch([stream_task, Task::done(start_msg)]);
         }
         Err(message) => {
-            let (task, transition) = app
-                .state
-                .update_erased(message, &app.llm, &mut app.memory_manager);
-            if let Some(new_state) = transition {
-                app.state = new_state;
+            // ── Stream service: route StreamResponse to active state ──
+            match message.downcast::<StreamResponse>() {
+                Ok(resp) => {
+                    let owner_id = resp.owner;
+                    let (task, transition) = app
+                        .states
+                        .get_mut(&owner_id)
+                        .expect("stream owner state")
+                        .handle_stream_response(resp.content, &mut app.data);
+                    if let Some(type_id) = transition {
+                        app.active = type_id;
+                    }
+                    return task;
+                }
+                Err(message) => {
+                    // ── Sidebar nav ──
+                    match message.downcast::<SidebarNav>() {
+                        Ok(nav) => {
+                            if app.states.contains_key(&nav.0) {
+                                app.active = nav.0;
+                            }
+                            Task::none()
+                        }
+                        Err(message) => {
+                            let (task, transition) = app
+                                .states
+                                .get_mut(&app.active)
+                                .expect("active state")
+                                .update_erased(message, &mut app.data);
+                            if let Some(type_id) = transition {
+                                app.active = type_id;
+                            }
+                            task
+                        }
+                    }
+                }
             }
-            task
         }
     }
 }
@@ -175,10 +181,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let buttons: Vec<Element<'_, Message>> = app
         .sidebar
         .iter()
-        .enumerate()
-        .map(|(i, entry)| {
+        .map(|entry| {
             let btn: Element<'_, SidebarNav> = button(text(entry.label))
-                .on_press(SidebarNav(i))
+                .on_press(SidebarNav(entry.type_id))
                 .width(Length::Fill)
                 .into();
             btn.map(|nav| Box::new(nav) as Message)
@@ -189,16 +194,22 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .width(Length::Fixed(120.0))
         .height(Length::Fill)
         .padding(8)
-        .style(|_: &Theme| {
+        .style(|theme: &Theme| {
             container::Style {
-                background: Some(iced::Background::Color(Color::from_rgb(
-                    0.1, 0.11, 0.16,
-                ))),
+                background: Some(iced::Background::Color(
+                    theme.extended_palette().background.weak.color,
+                )),
                 ..Default::default()
             }
         });
 
-    row![sidebar, app.state.view_erased(&app.memory_manager)].into()
+    let active_view = app
+        .states
+        .get(&app.active)
+        .expect("active state")
+        .view_erased(&app.data);
+
+    row![sidebar, active_view].into()
 }
 
 pub fn theme(_app: &App) -> Theme {

@@ -151,12 +151,17 @@ pub fn probe_update<T: Probe>(value: &mut T, msg: ProbeMsg<T::ChildMsg>) {
 
 // ── Tab button styles ──────────────────────────────────────────────
 
-fn selected_tab_style(_theme: &iced::Theme, _status: iced::widget::button::Status) -> iced::widget::button::Style {
+fn selected_tab_style(theme: &iced::Theme, _status: iced::widget::button::Status) -> iced::widget::button::Style {
+    let palette = theme.extended_palette();
     iced::widget::button::Style {
-        background: Some(iced::Background::Color(iced::Color::from_rgb(0.25, 0.25, 0.35))),
-        text_color: iced::Color::WHITE,
+        background: Some(iced::Background::Color(palette.primary.base.color)),
+        text_color: palette.primary.base.text,
         border: iced::Border {
-            color: iced::Color::from_rgb(0.4, 0.4, 0.55),
+            color: {
+                let mut c = palette.primary.base.color;
+                c.a *= 0.7;
+                c
+            },
             width: 1.0,
             radius: 4.0.into(),
         },
@@ -164,12 +169,19 @@ fn selected_tab_style(_theme: &iced::Theme, _status: iced::widget::button::Statu
     }
 }
 
-fn unselected_tab_style(_theme: &iced::Theme, _status: iced::widget::button::Status) -> iced::widget::button::Style {
+fn unselected_tab_style(theme: &iced::Theme, _status: iced::widget::button::Status) -> iced::widget::button::Style {
+    let palette = theme.extended_palette();
+    let mut text_color = palette.background.base.text;
+    text_color.a = 0.5;
     iced::widget::button::Style {
-        background: Some(iced::Background::Color(iced::Color::from_rgb(0.12, 0.12, 0.15))),
-        text_color: iced::Color::from_rgb(0.5, 0.5, 0.6),
+        background: Some(iced::Background::Color(palette.background.weak.color)),
+        text_color,
         border: iced::Border {
-            color: iced::Color::from_rgb(0.2, 0.2, 0.25),
+            color: {
+                let mut c = palette.background.strong.color;
+                c.a = 0.3;
+                c
+            },
             width: 1.0,
             radius: 4.0.into(),
         },

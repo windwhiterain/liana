@@ -15,3 +15,17 @@ pub fn llm_from_config(config: &Config) -> LLM {
         .agent(&config.model)
         .build()
 }
+
+pub fn llm_json_from_config(config: &Config) -> LLM {
+    openai::Client::builder()
+        .api_key(&config.api_key)
+        .base_url(&config.base_url)
+        .build()
+        .expect("Failed to build LLM client")
+        .completions_api()
+        .agent(&config.model)
+        .additional_params(
+            serde_json::json!({"response_format": {"type": "json_object"}}),
+        )
+        .build()
+}

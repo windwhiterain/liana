@@ -1,41 +1,42 @@
-use std::sync::Arc;
-
-use frostmark::{MarkState, MarkWidget};
+use iced::widget::markdown;
 use iced::{
-    Alignment, Element, Length, Task,
+    Alignment, Element, Length, Task, Theme,
     widget::{button, column, container, row, scrollable, text},
 };
 use liana_probe::Probe;
 use rig::{
     OneOrMany,
     agent::Text,
-    completion::{Prompt, PromptError},
-    message::{AssistantContent, Message, UserContent},
+    message::{AssistantContent, Message, Reasoning, UserContent},
 };
 
+use super::{State, StreamIntent};
 use crate::{
-    ErasedState, State,
-    llm::LLM,
     memory::{self, SUMMARY_PROMPT},
     probe,
+    stream::StreamMsg,
 };
 
 pub struct Chat {
-    pub messages: Vec<Message>,
-    markdown_states: Vec<MarkState>,
     pub config: Config,
-    pub parent_memory: Option<memory::NodeId>,
-    pub busy: bool,
+    busy: Busy,
+    streaming_text: String,
+    streaming_reasoning: String,
+    streaming_markdown: Vec<markdown::Item>,
+    streaming_reasoning_md: Vec<markdown::Item>,
+    reasoning_expanded: bool,
 }
 
 impl Default for Chat {
     fn default() -> Self {
         Self {
-            messages: Vec::new(),
-            markdown_states: Vec::new(),
             config: Config::default(),
-            parent_memory: None,
-            busy: false,
+            busy: Busy::Idle,
+            streaming_text: String::new(),
+            streaming_reasoning: String::new(),
+            streaming_markdown: Vec::new(),
+            streaming_reasoning_md: Vec::new(),
+            reasoning_expanded: false,
         }
     }
 }
@@ -44,9 +45,13 @@ impl Default for Chat {
 pub enum ChatMessage {
     Run,
     ConfigProbe(probe::ProbeMsg<ConfigProbeMsg>),
-    ChatResponse(Result<String, String>),
-    SummaryResponse(Result<String, String>),
+    StreamIntent(StreamIntent),
+    ToggleReasoning,
+    LinkClicked(String),
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Busy { Idle, Message, Summary }
 
 #[derive(Debug, Clone, Probe)]
 #[probe(tags = "inlined")]
@@ -76,21 +81,10 @@ impl Default for MessageConfig {
 }
 
 impl Chat {
-    pub fn with_parent_memory(parent_memory: Option<memory::NodeId>) -> Self {
-        Self {
-            parent_memory,
-            ..Self::default()
-        }
-    }
-
-    pub fn context<'a>(
-        parent_memory: Option<memory::NodeId>,
-        messages: &'a Vec<Message>,
-        memory_manager: &'a memory::Manager,
-    ) -> impl Iterator<Item = Message> {
-        memory_manager
-            .messages(parent_memory)
-            .chain(messages.iter().cloned())
+    pub fn context<'a>(data: &'a crate::Data) -> impl Iterator<Item = Message> {
+        data.memory_manager
+            .messages(data.parent_memory)
+            .chain(data.messages.iter().cloned())
     }
 }
 
@@ -100,158 +94,236 @@ impl State for Chat {
     fn update(
         &mut self,
         message: ChatMessage,
-        llm: &Arc<LLM>,
-        memory_manager: &mut memory::Manager,
-    ) -> (Task<ChatMessage>, Option<Box<dyn ErasedState>>) {
+        data: &mut crate::Data,
+    ) -> (Task<ChatMessage>, Option<std::any::TypeId>) {
         match message {
             ChatMessage::Run => {
-                if self.busy {
+                if self.busy != Busy::Idle {
                     return (Task::none(), None);
                 }
-                self.busy = true;
 
                 match &mut self.config {
                     Config::Message(config) => {
                         let message_text = config.message.text().to_string();
                         config.message = probe::TextEditor::new();
-                        let llm = Arc::clone(llm);
-                        let history =
-                            Self::context(self.parent_memory, &self.messages, memory_manager)
-                                .collect::<Vec<_>>();
+                        let history = Self::context(data).collect::<Vec<_>>();
 
-                        self.messages.push(Message::User {
+                        data.messages.push(Message::User {
                             content: OneOrMany::one(UserContent::Text(Text {
                                 text: message_text.clone(),
                                 ..Default::default()
                             })),
                         });
-                        self.markdown_states.push(MarkState::default());
+                        data.markdown_states.push(Vec::new());
+                        data.reasoning_markdown_states.push(None);
+                        self.streaming_text.clear();
+                        self.streaming_reasoning.clear();
+                        self.streaming_markdown = Vec::new();
+                        self.streaming_reasoning_md = Vec::new();
+                        self.busy = Busy::Message;
 
                         (
-                            Task::perform(
-                                async move {
-                                    llm.prompt(message_text)
-                                        .history(history)
-                                        .await
-                                        .map_err(|e: PromptError| e.to_string())
-                                },
-                                ChatMessage::ChatResponse,
-                            ),
+                            Task::done(ChatMessage::StreamIntent(StreamIntent {
+                                owner: Self::type_id(),
+                                task_id: 0,
+                                prompt: message_text,
+                                history,
+                                json: false,
+                            })),
                             None,
                         )
                     }
                     Config::Summary => {
-                        let llm = Arc::clone(llm);
-                        let history =
-                            Self::context(self.parent_memory, &self.messages, memory_manager)
-                                .collect::<Vec<_>>();
+                        let history = Self::context(data).collect::<Vec<_>>();
 
-                        self.messages.push(Message::User {
+                        data.messages.push(Message::User {
                             content: OneOrMany::one(UserContent::Text(Text {
                                 text: SUMMARY_PROMPT.to_string(),
                                 ..Default::default()
                             })),
                         });
-                        self.markdown_states.push(MarkState::default());
+                        data.markdown_states.push(Vec::new());
+                        data.reasoning_markdown_states.push(None);
+                        self.streaming_text.clear();
+                        self.streaming_reasoning.clear();
+                        self.streaming_markdown = Vec::new();
+                        self.streaming_reasoning_md = Vec::new();
+                        self.busy = Busy::Summary;
 
                         (
-                            Task::perform(
-                                async move {
-                                    llm.prompt(SUMMARY_PROMPT)
-                                        .history(history)
-                                        .await
-                                        .map_err(|e: PromptError| e.to_string())
-                                },
-                                ChatMessage::SummaryResponse,
-                            ),
+                            Task::done(ChatMessage::StreamIntent(StreamIntent {
+                                owner: Self::type_id(),
+                                task_id: 0,
+                                prompt: SUMMARY_PROMPT.to_string(),
+                                history,
+                                json: false,
+                            })),
                             None,
                         )
                     }
                 }
             }
-            ChatMessage::ChatResponse(result) => {
-                self.busy = false;
-                match result {
-                    Ok(response) => {
-                        self.markdown_states.push(
-                            MarkState::with_html_and_markdown(&response),
-                        );
-                        self.messages.push(Message::Assistant {
-                            id: None,
-                            content: OneOrMany::one(AssistantContent::Text(Text {
-                                text: response,
-                                ..Default::default()
-                            })),
-                        });
-                    }
-                    Err(err) => {
-                        eprintln!("LLM error: {}", err);
-                    }
-                }
-                (Task::none(), None)
-            }
-            ChatMessage::SummaryResponse(result) => {
-                self.busy = false;
-                match result {
-                    Ok(response) => {
-                        self.messages.push(Message::Assistant {
-                            id: None,
-                            content: OneOrMany::one(AssistantContent::Text(Text {
-                                text: response.clone(),
-                                ..Default::default()
-                            })),
-                        });
-                        let messages = std::mem::take(&mut self.messages);
-                        self.markdown_states.clear();
-                        let memory = memory::Memory::new(messages, response);
-                        memory_manager.add_memory(memory, self.parent_memory);
-                        self.parent_memory =
-                            memory_manager.memories.last().and_then(|m| m.nodes.last().copied());
-                    }
-                    Err(err) => {
-                        eprintln!("LLM error during summary: {}", err);
-                    }
-                }
-                (Task::none(), None)
-            }
             ChatMessage::ConfigProbe(msg) => {
                 probe::probe_update(&mut self.config, msg);
+                (Task::none(), None)
+            }
+            ChatMessage::StreamIntent(_) => {
+                (Task::none(), None)
+            }
+            ChatMessage::ToggleReasoning => {
+                self.reasoning_expanded = !self.reasoning_expanded;
+                (Task::none(), None)
+            }
+            ChatMessage::LinkClicked(_) => (Task::none(), None),
+        }
+    }
+
+    fn handle_stream_response(
+        &mut self,
+        content: StreamMsg,
+        data: &mut crate::Data,
+    ) -> (Task<ChatMessage>, Option<std::any::TypeId>) {
+        match content {
+            StreamMsg::Started => (Task::none(), None),
+            StreamMsg::Text(text) => {
+                self.streaming_text.push_str(&text);
+                self.streaming_markdown = markdown::parse(&self.streaming_text).collect();
+                (Task::none(), None)
+            }
+            StreamMsg::Reasoning(reasoning) => {
+                self.streaming_reasoning.push_str(&reasoning);
+                self.streaming_reasoning_md = markdown::parse(&self.streaming_reasoning).collect();
+                (Task::none(), None)
+            }
+            StreamMsg::Done => {
+                let reasoning = std::mem::take(&mut self.streaming_reasoning);
+                let text = std::mem::take(&mut self.streaming_text);
+
+                match self.busy {
+                    Busy::Message => {
+                        data.reasoning_markdown_states.push(if !reasoning.is_empty() {
+                            Some(markdown::parse(&reasoning).collect())
+                        } else {
+                            None
+                        });
+                        data.markdown_states
+                            .push(markdown::parse(&text).collect());
+                        let mut content: Vec<AssistantContent> = vec![];
+                        if !reasoning.is_empty() {
+                            content.push(AssistantContent::Reasoning(
+                                Reasoning::new(&reasoning),
+                            ));
+                        }
+                        content.push(AssistantContent::Text(Text {
+                            text,
+                            ..Default::default()
+                        }));
+                        data.messages.push(Message::Assistant {
+                            id: None,
+                            content: OneOrMany::many(content)
+                                .expect("assistant content is never empty"),
+                        });
+                    }
+                    Busy::Summary => {
+                        data.reasoning_markdown_states.push(None);
+                        data.messages.push(Message::Assistant {
+                            id: None,
+                            content: OneOrMany::one(AssistantContent::Text(Text {
+                                text: text.clone(),
+                                ..Default::default()
+                            })),
+                        });
+                        let messages = std::mem::take(&mut data.messages);
+                        data.markdown_states.clear();
+                        data.reasoning_markdown_states.clear();
+                        let memory = memory::Memory::new(messages, text);
+                        data.memory_manager.add_memory(memory, data.parent_memory);
+                        data.parent_memory = data.memory_manager
+                            .memories
+                            .last()
+                            .and_then(|m| {
+                                data.memory_markdowns
+                                    .push(markdown::parse(&m.summary).collect());
+                                m.nodes.last().copied()
+                            });
+                    }
+                    Busy::Idle => {}
+                }
+                self.busy = Busy::Idle;
+                (Task::none(), None)
+            }
+            StreamMsg::Error(err) => {
+                self.busy = Busy::Idle;
+                self.streaming_text.clear();
+                self.streaming_reasoning.clear();
+                self.streaming_markdown = Vec::new();
+                self.streaming_reasoning_md = Vec::new();
+                eprintln!("Chat stream error: {}", err);
                 (Task::none(), None)
             }
         }
     }
 
-    fn view<'a>(&'a self, _memory_manager: &'a memory::Manager) -> Element<'a, ChatMessage> {
-        column![
-            scrollable(column(
-                self.messages
-                    .iter()
-                    .enumerate()
-                    .map(|(i, msg)| render_message(i, msg, &self.markdown_states))
-                    .collect::<Vec<_>>()
-            )
-            .spacing(12))
-            .height(Length::Fill),
+    fn view<'a>(&'a self, data: &'a crate::Data) -> Element<'a, ChatMessage> {
+        let mut children: Vec<Element<'a, ChatMessage>> = vec![];
+
+        let mut message_items: Vec<Element<'a, ChatMessage>> = data
+            .messages
+            .iter()
+            .enumerate()
+            .map(|(i, msg)| {
+                render_message(
+                    i,
+                    msg,
+                    &data.markdown_states,
+                    &data.reasoning_markdown_states,
+                    self.reasoning_expanded,
+                )
+            })
+            .collect();
+
+        if self.busy != Busy::Idle && (!self.streaming_text.is_empty() || !self.streaming_reasoning.is_empty())
+        {
+            message_items.push(render_streaming(
+                &self.streaming_reasoning,
+                &self.streaming_reasoning_md,
+                &self.streaming_text,
+                &self.streaming_markdown,
+                self.reasoning_expanded,
+            ));
+        }
+
+        children.push(
+            scrollable(column(message_items).spacing(12))
+                .height(Length::Fill)
+                .into(),
+        );
+
+        children.push(
             container(
                 row![
                     probe::probe_view(&self.config).map(ChatMessage::ConfigProbe),
                     button(text("run"))
-                        .on_press(ChatMessage::Run)
+                        .on_press_maybe(if self.busy != Busy::Idle { None } else { Some(ChatMessage::Run) })
                         .width(Length::Shrink),
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center),
             )
-            .padding(8),
-        ]
-        .into()
+            .padding(8)
+            .into(),
+        );
+
+        column(children).into()
     }
 }
 
 fn render_message<'a>(
     index: usize,
     message: &Message,
-    states: &'a [MarkState],
+    states: &'a [Vec<markdown::Item>],
+    reasoning_states: &'a [Option<Vec<markdown::Item>>],
+    reasoning_expanded: bool,
 ) -> Element<'a, ChatMessage> {
     match message {
         Message::User { content } => {
@@ -274,17 +346,123 @@ fn render_message<'a>(
                 .spacing(4)
                 .into()
         }
-        Message::Assistant { .. } => {
-            let md_widget: Element<'a, ChatMessage> = if index < states.len() {
-                MarkWidget::new(&states[index]).into()
-            } else {
-                text("").into()
-            };
-            column![text("Liana").size(14), md_widget]
-                .spacing(4)
-                .into()
+        Message::Assistant { content: assistant_content, .. } => {
+            if index >= states.len() {
+                return text("").into();
+            }
+            let mut items: Vec<Element<'a, ChatMessage>> = vec![];
+
+            for c in assistant_content.iter() {
+                match c {
+                    AssistantContent::Reasoning(_) => {
+                        if let Some(Some(reasoning_md)) = reasoning_states.get(index) {
+                            items.push(render_reasoning_section(reasoning_md, reasoning_expanded));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            let md_widget: Element<'a, ChatMessage> = markdown::view(&states[index], Theme::Dark)
+                .map(|_| ChatMessage::LinkClicked(String::new()))
+                .into();
+            items.push(column![text("Liana").size(14), md_widget].spacing(4).into());
+            column(items).spacing(8).into()
         }
     }
 }
 
+fn render_reasoning_section<'a>(
+    reasoning_md: &'a [markdown::Item],
+    expanded: bool,
+) -> Element<'a, ChatMessage> {
+    if expanded {
+        let md: Element<'a, ChatMessage> = markdown::view(reasoning_md, Theme::Dark)
+            .map(|_| ChatMessage::LinkClicked(String::new()))
+            .into();
+        let boxed: Element<'a, ChatMessage> = container(md)
+            .padding(8)
+            .style(|theme: &Theme| iced::widget::container::Style {
+                border: iced::Border {
+                    color: {
+                        let mut c = theme.extended_palette().primary.base.color;
+                        c.a = 0.25;
+                        c
+                    },
+                    width: 1.0,
+                    radius: 4.0.into(),
+                },
+                ..Default::default()
+            })
+            .into();
+        column![
+            button(text("Hide thinking"))
+                .on_press(ChatMessage::ToggleReasoning),
+            boxed,
+        ]
+        .spacing(4)
+        .into()
+    } else {
+        button(text("Show thinking..."))
+            .on_press(ChatMessage::ToggleReasoning)
+            .into()
+    }
+}
 
+fn render_streaming<'a>(
+    reasoning: &'a str,
+    reasoning_md: &'a [markdown::Item],
+    response: &'a str,
+    response_md: &'a [markdown::Item],
+    expanded: bool,
+) -> Element<'a, ChatMessage> {
+    let mut children: Vec<Element<'a, ChatMessage>> = vec![];
+    if !reasoning.is_empty() {
+        if expanded {
+            let md: Element<'a, ChatMessage> = markdown::view(reasoning_md, Theme::Dark)
+                .map(|_| ChatMessage::LinkClicked(String::new()))
+                .into();
+            let boxed: Element<'a, ChatMessage> = container(md)
+                .padding(8)
+                .style(|theme: &Theme| iced::widget::container::Style {
+                    border: iced::Border {
+                        color: {
+                            let mut c = theme.palette().text;
+                            c.a = 0.15;
+                            c
+                        },
+                        width: 1.0,
+                        radius: 4.0.into(),
+                    },
+                    ..Default::default()
+                })
+                .into();
+            children.push(
+                column![
+                    button(text("Hide thinking"))
+                        .on_press(ChatMessage::ToggleReasoning),
+                    boxed,
+                ]
+                .spacing(4)
+                .into(),
+            );
+        } else {
+            children.push(
+                button(text("Show thinking..."))
+                    .on_press(ChatMessage::ToggleReasoning)
+                    .into(),
+            );
+        }
+    }
+    if !response.is_empty() {
+        let md: Element<'a, ChatMessage> = markdown::view(response_md, Theme::Dark)
+            .map(|_| ChatMessage::LinkClicked(String::new()))
+            .into();
+        children.push(
+            column![text("Streaming...").size(12), md]
+                .spacing(4)
+                .into(),
+        );
+    }
+    column(children).spacing(8).into()
+}

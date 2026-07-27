@@ -7,16 +7,15 @@ use rig::{
 use rig_memory::{HeuristicTokenCounter, TokenCounter};
 use std::{collections::HashSet, fmt::Display};
 
+pub const LIST_MEMORY_PROMPT: &str = "I don't have enough memory in context, I need to select relevant memories from list:";
+
 pub const SELECT_MEMORY_PROMPT: &'static str = indoc!(
     "
-    given the last question I ask or task I assign to you, do not answer, please filter and select strongly relative memories listed bellow, from high-relativity to low, only select nessesary memory.
-    if you found that the paragraph is talking something you are confused or seems lack some background, its because the related memories were wipped out from you, you must aggressively guess and pick related memories from the list.
-    if the user change topic, just return empty array [].
-    only output an json array of indices of your selected memories, example: [3,0,8,4].
+    META INSTRUCTION: before anything else, output the relevant memory heading numbers in a json array only
     "
 );
 
-pub const SUMMARY_PROMPT: &str = "summary our chat since the previous summary";
+pub const SUMMARY_PROMPT: &str = "summary our chat since the previous summary, in few sentences.";
 
 pub type Message = rig::message::Message;
 
@@ -94,8 +93,8 @@ impl Manager {
             ])
         })
     }
-    pub fn display_memories(&self) -> impl Display {
-        DisplayMemories(self.memories.iter().enumerate())
+    pub fn list_memories(&self) -> impl Display {
+        ListMemories(self.memories.iter().enumerate())
     }
     pub fn add_memory(&mut self, mut memory: Memory, parent: Option<NodeId>) -> MemoryId {
         self.size += memory.size;
@@ -226,12 +225,12 @@ impl<'a> Iterator for MemoryIterator<'a> {
     }
 }
 
-pub struct DisplayMemories<'a, T: IntoIterator<Item = (usize, &'a Memory)> + Clone>(pub T);
+pub struct ListMemories<'a, T: IntoIterator<Item = (usize, &'a Memory)> + Clone>(pub T);
 
-impl<'a, T: IntoIterator<Item = (usize, &'a Memory)> + Clone> Display for DisplayMemories<'a, T> {
+impl<'a, T: IntoIterator<Item = (usize, &'a Memory)> + Clone> Display for ListMemories<'a, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for (id, memory) in self.0.clone().into_iter() {
-            writeln!(f, "{id}. {}", memory.summary)?;
+            writeln!(f, "== {id}\n{}", memory.summary)?;
         }
         Ok(())
     }
